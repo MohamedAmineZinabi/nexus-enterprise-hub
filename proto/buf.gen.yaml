@@ -1,0 +1,18 @@
+# ==============================================================================
+# Buf Code Generation Template for NexusEnterprise Hub
+# ==============================================================================
+version: v2
+plugins:
+  # Python Protobuf and gRPC Generation
+  - remote: buf.build/protocolbuffers/python:v28.2
+    out: ../services/ai-service/app/grpc/generated
+  - remote: buf.build/grpc/python:v1.66.2
+    out: ../services/ai-service/app/grpc/generated
+  - remote: buf.build/protocolbuffers/pyi:v28.2
+    out: ../services/ai-service/app/grpc/generated
+
+  # Java Protobuf and gRPC Generation (Spring Boot)
+  - remote: buf.build/protocolbuffers/java:v28.2
+    out: ../services/core-service/src/main/java
+  - remote: buf.build/grpc/java:v1.66.0
+    out: ../services/core-service/src/main/java

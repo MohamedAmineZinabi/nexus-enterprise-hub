@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package nexus.ai.v1;
+
+import "ai/common.proto";
+
+option java_package = "com.nexus.hub.grpc.ai.v1";
+option java_multiple_files = true;
+
+// =============================================================================
+// RagService - Vector Ingestion, Hybrid Search & Embeddings Management
+// =============================================================================
+service RagService {
+  // Ingest and chunk documents into Qdrant collections
+  rpc IngestDocument(IngestDocumentRequest) returns (IngestDocumentResponse);
+
+  // Hybrid vector search (Dense Semantic + Sparse Keyword) with cross-encoder re-ranking
+  rpc HybridSearch(HybridSearchRequest) returns (HybridSearchResponse);
+
+  // Purge document vectors from a specified collection
+  rpc DeleteDocumentVectors(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Ingest Document Messages
+// -----------------------------------------------------------------------------
+message IngestDocumentRequest {
+  nexus.ai.common.TenantContext context = 1;
+  string document_id = 2;
+  // Shared volume path accessible by ai-service (e.g., /shared-uploads/doc-123.pdf)
+  string file_path = 3;
+  string mime_type = 4;
+  int32 chunk_size = 5;
+  int32 chunk_overlap = 6;
+  string vector_collection = 7;
+  map<string, string> metadata = 8;
+}
+
+message IngestDocumentResponse {
+  string document_id = 1;
+  bool success = 2;
+  int32 chunks_created = 3;
+  string vector_collection = 4;
+  string message = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Hybrid Search Messages
+// -----------------------------------------------------------------------------
+message HybridSearchRequest {
+  nexus.ai.common.TenantContext context = 1;
+  string query = 2;
+  int32 top_k = 3;
+  // Weight balancing dense vs. sparse retrieval (0.0 = purely keyword/BM25, 1.0 = purely dense semantic)
+  float alpha = 4;
+  map<string, string> metadata_filters = 5;
+  bool rerank = 6;
+  string collection_name = 7;
+}
+
+message DocumentChunk {
+  string chunk_id = 1;
+  string document_id = 2;
+  string content = 3;
+  float score = 4;
+  float rerank_score = 5;
+  map<string, string> metadata = 6;
+  string citation = 7;
+}
+
+message HybridSearchResponse {
+  repeated DocumentChunk results = 1;
+  int32 total_found = 2;
+  string query_interpreted = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Delete Document Messages
+// -----------------------------------------------------------------------------
+message DeleteDocumentRequest {
+  nexus.ai.common.TenantContext context = 1;
+  string document_id = 2;
+  string collection_name = 3;
+}
+
+message DeleteDocumentResponse {
+  string document_id = 1;
+  bool success = 2;
+  int32 vectors_deleted = 3;
+  string message = 4;
+}

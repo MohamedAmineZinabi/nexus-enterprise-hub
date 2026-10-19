@@ -10,6 +10,11 @@ check-env:
 		cp .env.example $(ENV_FILE); \
 	fi
 
+.PHONY: proto
+proto:
+	@echo "Compiling Protocol Buffer contracts..."
+	@bash scripts/compile-proto.sh
+
 .PHONY: infra-up
 infra-up: check-env
 	@echo "Starting NexusEnterprise Hub base infrastructure..."

@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package nexus.ai.common;
+
+option java_package = "com.nexus.hub.grpc.common";
+option java_multiple_files = true;
+
+// Authentication and Multi-Tenancy context propagated across gRPC boundaries
+message TenantContext {
+  string tenant_id = 1;
+  string user_id = 2;
+  string trace_id = 3;
+  repeated string roles = 4;
+}
+
+message PaginationRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+message PaginationResponse {
+  int64 total_items = 1;
+  int32 total_pages = 2;
+  int32 current_page = 3;
+  int32 page_size = 4;
+}
+
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+  string field = 3;
+  map<string, string> metadata = 4;
+}
+
+message Empty {}

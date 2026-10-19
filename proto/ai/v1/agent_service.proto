@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package nexus.ai.v1;
+
+import "ai/common.proto";
+
+option java_package = "com.nexus.hub.grpc.ai.v1";
+option java_multiple_files = true;
+
+// =============================================================================
+// AgentService - Multi-Agent Workflows, MCP Discovery & Live Streaming
+// =============================================================================
+service AgentService {
+  // Synchronous, low-latency execution of a single agent pipeline
+  rpc ExecuteAgentSync(AgentQueryRequest) returns (AgentQueryResponse);
+
+  // Server-streaming RPC emitting live LangGraph node transitions, tool calls, and LLM tokens
+  rpc StreamAgentWorkflow(AgentQueryRequest) returns (stream AgentWorkflowEvent);
+
+  // Discover registered Model Context Protocol (MCP) tools across active servers
+  rpc ListMcpTools(ListMcpToolsRequest) returns (ListMcpToolsResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Request & Response Payloads
+// -----------------------------------------------------------------------------
+message AgentQueryRequest {
+  nexus.ai.common.TenantContext context = 1;
+  string task_id = 2;
+  string user_prompt = 3;
+  repeated string mcp_tools_enabled = 4;
+  map<string, string> session_parameters = 5;
+  bool enable_critic = 6;
+}
+
+message AgentCitation {
+  string document_id = 1;
+  string title = 2;
+  string snippet = 3;
+  float confidence = 4;
+}
+
+message AgentQueryResponse {
+  string task_id = 1;
+  string response_text = 2;
+  repeated AgentCitation citations = 3;
+  int64 total_tokens_used = 4;
+  string execution_status = 5;
+  int64 latency_ms = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Workflow Event Streaming Payloads
+// -----------------------------------------------------------------------------
+enum NodeType {
+  NODE_TYPE_UNSPECIFIED = 0;
+  NODE_TYPE_PLANNER = 1;
+  NODE_TYPE_RESEARCHER = 2;
+  NODE_TYPE_SYNTHESIZER = 3;
+  NODE_TYPE_CRITIC = 4;
+  NODE_TYPE_MCP_TOOL = 5;
+}
+
+enum EventPhase {
+  EVENT_PHASE_UNSPECIFIED = 0;
+  EVENT_PHASE_STARTED = 1;
+  EVENT_PHASE_IN_PROGRESS = 2;
+  EVENT_PHASE_COMPLETED = 3;
+  EVENT_PHASE_FAILED = 4;
+}
+
+message AgentWorkflowEvent {
+  string task_id = 1;
+  string trace_id = 2;
+  NodeType node_type = 3;
+  EventPhase phase = 4;
+  string token_chunk = 5;
+  string message = 6;
+  string mcp_tool_name = 7;
+  string mcp_tool_input = 8;
+  string mcp_tool_output = 9;
+  int64 timestamp_ms = 10;
+}
+
+// -----------------------------------------------------------------------------
+// MCP Tools Management
+// -----------------------------------------------------------------------------
+message ListMcpToolsRequest {
+  nexus.ai.common.TenantContext context = 1;
+}
+
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  string server_origin = 4;
+}
+
+message ListMcpToolsResponse {
+  repeated McpToolDefinition tools = 1;
+  int32 total_tools = 2;
+}
