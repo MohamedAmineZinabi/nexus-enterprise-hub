@@ -1,0 +1,76 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: core-service
+
+  profiles:
+    active: dev
+
+  # Relational Database Persistence (PostgreSQL 16)
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexus_db}?currentSchema=core
+    username: ${POSTGRES_USER:nexus_admin}
+    password: ${POSTGRES_PASSWORD:nexus_super_secret_password_2026}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 15
+      minimum-idle: 5
+      pool-name: NexusHikariPool
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: core
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  # Flyway Database Migration
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: "0"
+    schemas: core
+    default-schema: core
+    locations: classpath:db/migration
+
+  # Redis Distributed Cache & Token Blacklist
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:nexus_redis_secret_token_2026}
+      timeout: 3000ms
+
+  # Kafka Event Streaming
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: nexus-core-service-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+
+# Application-Specific Enterprise Tokens & Configurations
+nexus:
+  security:
+    jwt:
+      # 256-bit Hex Key for HMAC-SHA256
+      secret: ${JWT_SECRET:4e65787573456e746572707269736548756253757065725365637265744b6579323032362140232425}
+      expiration-ms: 86400000 # 24 Hours
+  storage:
+    upload-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
+  ai-service:
+    grpc:
+      host: ${AI_SERVICE_GRPC_HOST:localhost}
+      port: ${AI_SERVICE_GRPC_PORT:50051}

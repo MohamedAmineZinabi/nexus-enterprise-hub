@@ -38,3 +38,18 @@ infra-clean:
 status:
 	@echo "=== NexusEnterprise Hub Infrastructure Status ==="
 	docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE) ps
+
+.PHONY: core-build
+core-build:
+	@echo "Building core-service Docker image..."
+	docker build -f services/core-service/Dockerfile -t nexus-hub/core-service:latest .
+
+.PHONY: core-run
+core-run:
+	@echo "Running core-service on nexus-network..."
+	docker run -d --name nexus-core-service --network nexus-network -p 8080:8080 --env-file $(ENV_FILE) -e POSTGRES_HOST=nexus-postgres -e REDIS_HOST=nexus-redis -e KAFKA_BOOTSTRAP_SERVERS=nexus-kafka:29092 nexus-hub/core-service:latest
+
+.PHONY: core-test
+core-test:
+	@echo "Running core-service test suite..."
+	docker run --rm -v "${PWD}:/workspace" -w /workspace/services/core-service maven:3.9.8-eclipse-temurin-21 mvn test
