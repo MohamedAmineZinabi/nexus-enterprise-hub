@@ -35,12 +35,21 @@ public class AgentTask {
     private String prompt;
 
     @Enumerated(EnumType.STRING)
+    @Column(name = "task_type", nullable = false, length = 50)
+    @Builder.Default
+    private TaskType taskType = TaskType.DEEP_RESEARCH;
+
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     @Builder.Default
     private TaskStatus status = TaskStatus.PENDING;
 
     @Column(name = "result_summary", columnDefinition = "TEXT")
     private String resultSummary;
+
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "metadata", columnDefinition = "jsonb")
+    private String metadata;
 
     @Column(name = "total_tokens_used", nullable = false)
     @Builder.Default

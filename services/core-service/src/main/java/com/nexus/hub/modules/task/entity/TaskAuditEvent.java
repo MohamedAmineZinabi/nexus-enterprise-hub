@@ -33,7 +33,8 @@ public class TaskAuditEvent {
     @Column(columnDefinition = "TEXT")
     private String message;
 
-    @Column(columnDefinition = "JSONB")
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
     private String payload;
 
     @CreationTimestamp

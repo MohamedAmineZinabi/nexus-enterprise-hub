@@ -70,6 +70,12 @@ nexus:
       expiration-ms: 86400000 # 24 Hours
   storage:
     upload-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
+  kafka:
+    topics:
+      agent-task-requested: ${KAFKA_TOPIC_AGENT_TASK_REQUESTED:agent.task.requested}
+      agent-task-events: ${KAFKA_TOPIC_AGENT_TASK_EVENTS:agent.task.events}
+      agent-task-completed: ${KAFKA_TOPIC_AGENT_TASK_COMPLETED:agent.task.completed}
+      agent-task-dlq: ${KAFKA_TOPIC_AGENT_TASK_DLQ:agent.task.dlq}
   ai-service:
     grpc:
       host: ${AI_SERVICE_GRPC_HOST:localhost}
