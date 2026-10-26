@@ -13,3 +13,15 @@ logging:
 spring:
   jpa:
     show-sql: true
+
+nexus:
+  storage:
+    shared-uploads-dir: ${SHARED_UPLOADS_DIR:./data/shared-uploads}
+    upload-dir: ${SHARED_UPLOADS_DIR:./data/shared-uploads}
+  grpc:
+    ai-service:
+      host: ${AI_SERVICE_GRPC_HOST:localhost}
+      port: ${AI_SERVICE_GRPC_PORT:50051}
+      deadline-ms: 15000
+      keep-alive-time-seconds: 30
+

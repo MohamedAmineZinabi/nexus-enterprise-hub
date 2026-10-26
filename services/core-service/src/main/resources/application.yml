@@ -69,6 +69,7 @@ nexus:
       secret: ${JWT_SECRET:4e65787573456e746572707269736548756253757065725365637265744b6579323032362140232425}
       expiration-ms: 86400000 # 24 Hours
   storage:
+    shared-uploads-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
     upload-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
   kafka:
     topics:
@@ -76,7 +77,10 @@ nexus:
       agent-task-events: ${KAFKA_TOPIC_AGENT_TASK_EVENTS:agent.task.events}
       agent-task-completed: ${KAFKA_TOPIC_AGENT_TASK_COMPLETED:agent.task.completed}
       agent-task-dlq: ${KAFKA_TOPIC_AGENT_TASK_DLQ:agent.task.dlq}
-  ai-service:
-    grpc:
-      host: ${AI_SERVICE_GRPC_HOST:localhost}
+  grpc:
+    ai-service:
+      host: ${AI_SERVICE_GRPC_HOST:ai-service}
       port: ${AI_SERVICE_GRPC_PORT:50051}
+      deadline-ms: ${AI_SERVICE_GRPC_DEADLINE_MS:15000}
+      keep-alive-time-seconds: ${AI_SERVICE_GRPC_KEEP_ALIVE_SECONDS:30}
+
