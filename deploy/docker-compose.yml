@@ -122,6 +122,31 @@ services:
     volumes:
       - ./init-scripts/kafka/create-topics.sh:/scripts/create-topics.sh:ro
     entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+  # ----------------------------------------------------------------------------
+  # 6. AI Microservice (FastAPI + gRPC + LangChain RAG)
+  # ----------------------------------------------------------------------------
+  ai-service:
+    build:
+      context: ..
+      dockerfile: services/ai-service/Dockerfile
+    image: nexus-hub/ai-service:latest
+    container_name: nexus-ai-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "50051:50051"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://:${REDIS_PASSWORD:-nexus_redis_secret_token_2026}@redis:6379
+      SHARED_UPLOADS_DIR: /shared-uploads
+      GRPC_PORT: 50051
+    volumes:
+      - shared_uploads:/shared-uploads
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - nexus-network
 
