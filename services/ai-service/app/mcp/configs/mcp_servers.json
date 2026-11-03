@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "enterprise_filesystem": {
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "-m",
+        "app.mcp.servers.filesystem_server"
+      ],
+      "env": {
+        "ALLOWED_DIRS": "/shared-uploads"
+      },
+      "description": "Enterprise filesystem MCP server for shared document operations"
+    },
+    "enterprise_analytics": {
+      "transport": "sse",
+      "url": "http://localhost:8000/mcp/sse",
+      "headers": {},
+      "description": "Nexus Hub internal MCP SSE bridge for hybrid RAG and document summarization"
+    }
+  }
+}
+
