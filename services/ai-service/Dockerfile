@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Install service dependencies
 COPY services/ai-service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 5 -r requirements.txt
 
 # Pre-cache HuggingFace SentenceTransformer and CrossEncoder models in image
 RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \

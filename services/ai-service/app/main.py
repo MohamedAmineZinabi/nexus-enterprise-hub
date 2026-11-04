@@ -1,64 +1,82 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.db.qdrant import init_qdrant_collection, get_qdrant_client
+from app.db.qdrant import get_qdrant_client, init_qdrant_collection
 from app.rag.embeddings import get_embedding_service
-from app.rag.reranker import get_cross_encoder_service
-from app.rag.ingestion import get_document_processor
-from app.rag.retrieval import get_hybrid_retriever
+from app.rag.reranker import get_reranker
+from app.rag.retriever import get_hybrid_retriever
 from app.grpc.server import start_grpc_server, stop_grpc_server
-from app.mcp.client_manager import get_mcp_client_manager
 from app.mcp.server import get_mcp_sse_app
+from app.mcp.client_manager import get_mcp_client_manager
+from app.agents.graph import get_agent_graph
+from app.agents.state import AgentWorkflowState
+from app.kafka.producer import get_event_publisher
+from app.kafka.consumer import get_task_consumer
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    level=logging.INFO if not settings.debug else logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
 )
 logger = logging.getLogger("nexus.ai_service")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle context manager: handles startup and graceful shutdown."""
+    """Application lifespan manager initializing DB, models, MCP manager, Kafka, and gRPC background server."""
     logger.info("=== Initializing NexusEnterprise AI Service ===")
 
-    # 1. Initialize Vector Database Schema
+    # 1. Warm up vector collection in Qdrant
     try:
         init_qdrant_collection()
-        logger.info(f"Qdrant collection '{settings.collection_name}' initialized.")
+        logger.info(f"Qdrant collection '{settings.qdrant_collection_name}' initialized.")
     except Exception as e:
-        logger.error(f"Failed to initialize Qdrant: {e}", exc_info=True)
+        logger.warning(f"Could not connect to Qdrant during startup: {e}. Will retry on request.")
 
-    # 2. Pre-warm Neural Models (CPU inference)
+    # 2. Warm up neural models in background / worker memory
     logger.info("Pre-warming Embedding and CrossEncoder neural models...")
     get_embedding_service()
-    get_cross_encoder_service()
-    logger.info("Neural models successfully loaded into memory.")
+    get_reranker()
+    get_hybrid_retriever()
+    logger.info("Neural models pre-warmed and ready for inference.")
 
-    # 3. Start gRPC Server
-    grpc_task = asyncio.create_task(start_grpc_server())
-
-    # 4. Initialize MCP Client Manager
+    # 3. Initialize Model Context Protocol (MCP) Client Manager
+    logger.info("Initializing MCP Client Manager...")
     mcp_manager = get_mcp_client_manager()
-    try:
-        await mcp_manager.initialize()
-        logger.info("MCP Client Manager initialized.")
-    except Exception as e:
-        logger.warning(f"Error initializing MCP Client Manager: {e}")
+    await mcp_manager.initialize()
+    logger.info("MCP Client Manager initialized.")
 
-    logger.info(f"AI Service ready: HTTP port {settings.http_port}, gRPC port {settings.grpc_port}")
+    # 4. Initialize Multi-Agent Graph Engine
+    logger.info("Initializing Multi-Agent LangGraph engine...")
+    get_agent_graph()
+    logger.info("Multi-Agent LangGraph engine initialized.")
+
+    # 5. Connect Kafka Producer & Start Kafka Consumer Background Loop
+    logger.info("Connecting Kafka Event Publisher and starting Consumer Loop...")
+    event_publisher = get_event_publisher()
+    try:
+        await event_publisher.start()
+    except Exception as e:
+        logger.warning(f"Kafka Publisher startup deferred: {e}. Will connect on demand.")
+
+    task_consumer = get_task_consumer()
+    await task_consumer.start()
+    logger.info("Kafka Task Consumer background task active.")
+
+    # 6. Start asyncio gRPC server
+    grpc_task = asyncio.create_task(start_grpc_server())
 
     yield
 
-    # Teardown logic
     logger.info("=== Shutting down NexusEnterprise AI Service ===")
+    await task_consumer.stop()
+    await event_publisher.stop()
     await mcp_manager.close()
     await stop_grpc_server(grace=3.0)
     try:
@@ -70,7 +88,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="NexusEnterprise Hub AI Service: LangChain RAG, Qdrant & Model Context Protocol (MCP)",
+    description="NexusEnterprise Hub AI Service: LangGraph Multi-Agent, Kafka Consumer & MCP Layer",
     lifespan=lifespan
 )
 
@@ -97,6 +115,7 @@ class ReadinessResponse(BaseModel):
     qdrant: bool
     grpc_port: int
     mcp_active: bool
+    kafka_consumer: bool
 
 
 class RestSearchRequest(BaseModel):
@@ -114,85 +133,77 @@ class McpCallRequest(BaseModel):
     arguments: Dict[str, Any] = {}
 
 
+class AgentExecuteRequest(BaseModel):
+    prompt: str
+    tenant_id: str = "default"
+    task_id: Optional[str] = None
+    document_ids: List[str] = []
+
+
 @app.get("/healthz", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Liveness probe returning basic service operational status."""
     return HealthResponse(
-        status="healthy",
-        service=settings.app_name,
+        status="ok",
+        service="ai-service",
         version=settings.app_version
     )
 
 
 @app.get("/readyz", response_model=ReadinessResponse, tags=["Health"])
 async def readiness_check():
-    """Readiness probe checking Qdrant, gRPC, and MCP connectivity."""
+    """Readiness probe checking Qdrant, gRPC, MCP, and Kafka connectivity."""
     qdrant_ok = False
     try:
         client = get_qdrant_client()
-        qdrant_ok = client.collection_exists(settings.collection_name)
+        client.get_collections()
+        qdrant_ok = True
     except Exception as e:
         logger.warning(f"Readiness check failed for Qdrant: {e}")
+
+    consumer = get_task_consumer()
+    consumer_active = consumer._running if consumer else False
 
     return ReadinessResponse(
         status="ready" if qdrant_ok else "degraded",
         qdrant=qdrant_ok,
         grpc_port=settings.grpc_port,
-        mcp_active=True
+        mcp_active=True,
+        kafka_consumer=consumer_active
     )
 
 
-@app.post("/api/v1/documents/index", tags=["Documents"])
-async def upload_and_index_document(
-    tenant_id: str = Form(...),
-    document_id: str = Form(...),
-    file: UploadFile = File(...)
-):
-    """Upload and process a document into vector embeddings."""
-    processor = get_document_processor()
-    try:
-        file_bytes = await file.read()
-        num_chunks = await processor.process_and_index(
-            tenant_id=tenant_id,
-            document_id=document_id,
-            filename=file.filename or "unknown",
-            file_bytes=file_bytes
-        )
-        return {
-            "status": "SUCCESS",
-            "document_id": document_id,
-            "filename": file.filename,
-            "chunks_indexed": num_chunks
-        }
-    except Exception as e:
-        logger.error(f"Failed to process and index document {document_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Indexing failed: {str(e)}"
-        )
-
-
-@app.post("/api/v1/search/hybrid", tags=["Search"])
+@app.post("/api/v1/rag/search", tags=["RAG"])
 async def rest_hybrid_search(payload: RestSearchRequest):
-    """Hybrid semantic vector + BM25 keyword search with Cross-Encoder reranking."""
-    retriever = get_hybrid_retriever()
+    """Direct REST endpoint for hybrid search and reranking verification."""
     try:
-        results = await retriever.search(
+        retriever = get_hybrid_retriever()
+        results = retriever.search(
             tenant_id=payload.tenant_id,
             query=payload.query,
             top_k=payload.top_k,
             alpha=payload.alpha,
-            rerank=payload.rerank,
-            collection_name=payload.collection_name
+            collection_name=payload.collection_name,
+            rerank=payload.rerank
         )
         return {
             "query": payload.query,
-            "tenant_id": payload.tenant_id,
-            "total_results": len(results),
-            "results": results
+            "total_found": len(results),
+            "results": [
+                {
+                    "chunk_id": r.chunk_id,
+                    "document_id": r.document_id,
+                    "content": r.content,
+                    "score": r.score,
+                    "rerank_score": r.rerank_score,
+                    "metadata": r.metadata,
+                    "citation": r.citation
+                }
+                for r in results
+            ]
         }
     except Exception as e:
-        logger.error(f"Hybrid search failed: {e}", exc_info=True)
+        logger.error(f"Search failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -242,6 +253,49 @@ async def call_mcp_tool(req: McpCallRequest):
         }
     except Exception as e:
         logger.error(f"MCP tool call failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@app.post("/api/v1/agents/execute", tags=["Agents"])
+async def execute_agent_workflow(req: AgentExecuteRequest):
+    """Direct HTTP trigger to run the LangGraph multi-agent loop."""
+    import uuid
+    task_id = req.task_id or f"task-{uuid.uuid4()}"
+    graph = get_agent_graph()
+
+    initial_state: AgentWorkflowState = {
+        "task_id": task_id,
+        "tenant_id": req.tenant_id,
+        "user_prompt": req.prompt,
+        "trace_id": f"trace-{task_id}",
+        "document_ids": req.document_ids,
+        "metadata": {},
+        "plan": [],
+        "research_data": [],
+        "draft_report": "",
+        "critique": {},
+        "iteration_count": 0,
+        "current_node": "START",
+        "status": "PROCESSING"
+    }
+
+    try:
+        config = {"configurable": {"thread_id": task_id}}
+        final_state = await graph.ainvoke(initial_state, config=config)
+        return {
+            "task_id": task_id,
+            "tenant_id": req.tenant_id,
+            "status": final_state.get("status"),
+            "plan": final_state.get("plan"),
+            "evidence_count": len(final_state.get("research_data", [])),
+            "critique": final_state.get("critique"),
+            "report": final_state.get("draft_report")
+        }
+    except Exception as e:
+        logger.error(f"Agent execution error: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

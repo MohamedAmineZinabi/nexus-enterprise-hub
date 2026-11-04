@@ -140,12 +140,15 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-nexus_redis_secret_token_2026}@redis:6379
       SHARED_UPLOADS_DIR: /shared-uploads
       GRPC_PORT: 50051
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     volumes:
       - shared_uploads:/shared-uploads
     depends_on:
       qdrant:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     networks:
       - nexus-network

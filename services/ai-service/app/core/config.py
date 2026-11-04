@@ -1,29 +1,37 @@
+import os
+from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application runtime configurations with environment variable overrides."""
+    """Production configuration settings for NexusEnterprise AI Service."""
 
+    # Application Metadata
     app_name: str = "NexusEnterprise AI Service"
     app_version: str = "1.0.0"
     debug: bool = False
 
-    # Backing Services
-    qdrant_url: str = Field(default="http://localhost:6333", validation_alias="QDRANT_URL")
-    collection_name: str = Field(default="enterprise_docs", validation_alias="COLLECTION_NAME")
-    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
-    shared_uploads_dir: str = Field(default="./data/shared-uploads", validation_alias="SHARED_UPLOADS_DIR")
-
-    # Networking & Ports
-    http_port: int = Field(default=8000, validation_alias="HTTP_PORT")
+    # HTTP & gRPC Binding
+    http_host: str = "0.0.0.0"
+    http_port: int = 8000
+    grpc_host: str = "0.0.0.0"
     grpc_port: int = Field(default=50051, validation_alias="GRPC_PORT")
 
-    # Neural & Machine Learning Models
-    embedding_model_name: str = Field(
-        default="BAAI/bge-small-en-v1.5",
-        validation_alias="EMBEDDING_MODEL_NAME"
-    )
+    # Qdrant Vector Storage
+    qdrant_url: str = Field(default="http://localhost:6333", validation_alias="QDRANT_URL")
+    qdrant_api_key: Optional[str] = Field(default=None, validation_alias="QDRANT_API_KEY")
+    qdrant_collection_name: str = Field(default="enterprise_docs", validation_alias="QDRANT_COLLECTION_NAME")
+
+    # Redis Cache & Task Synchronization
+    redis_url: str = Field(default="redis://localhost:6379", validation_alias="REDIS_URL")
+
+    # Shared Storage Path (Mounted Volume)
+    shared_uploads_dir: str = Field(default="/shared-uploads", validation_alias="SHARED_UPLOADS_DIR")
+
+    # Embedding & Cross-Encoder Neural Models
+    embedding_model_name: str = Field(default="BAAI/bge-small-en-v1.5", validation_alias="EMBEDDING_MODEL_NAME")
+    embedding_dimension: int = 384
     cross_encoder_model_name: str = Field(
         default="cross-encoder/ms-marco-MiniLM-L-6-v2",
         validation_alias="CROSS_ENCODER_MODEL_NAME"
@@ -44,6 +52,38 @@ class Settings(BaseSettings):
     mcp_client_timeout_seconds: float = Field(
         default=10.0,
         validation_alias="MCP_CLIENT_TIMEOUT_SECONDS"
+    )
+
+    # Multi-Agent Orchestration & Retries
+    max_agent_iterations: int = Field(
+        default=2,
+        validation_alias="MAX_AGENT_ITERATIONS"
+    )
+
+    # Kafka Messaging Configuration
+    kafka_bootstrap_servers: str = Field(
+        default="nexus-kafka:29092",
+        validation_alias="KAFKA_BOOTSTRAP_SERVERS"
+    )
+    kafka_group_id: str = Field(
+        default="nexus-ai-agents",
+        validation_alias="KAFKA_GROUP_ID"
+    )
+    kafka_topic_task_requested: str = Field(
+        default="agent.task.requested",
+        validation_alias="KAFKA_TOPIC_TASK_REQUESTED"
+    )
+    kafka_topic_task_events: str = Field(
+        default="agent.task.events",
+        validation_alias="KAFKA_TOPIC_TASK_EVENTS"
+    )
+    kafka_topic_task_completed: str = Field(
+        default="agent.task.completed",
+        validation_alias="KAFKA_TOPIC_TASK_COMPLETED"
+    )
+    kafka_topic_task_dlq: str = Field(
+        default="agent.task.dlq",
+        validation_alias="KAFKA_TOPIC_TASK_DLQ"
     )
 
     model_config = SettingsConfigDict(
