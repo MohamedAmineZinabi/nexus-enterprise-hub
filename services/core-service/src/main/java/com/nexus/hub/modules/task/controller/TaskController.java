@@ -4,16 +4,20 @@ import com.nexus.hub.common.dto.ApiResponse;
 import com.nexus.hub.modules.task.dto.CreateTaskRequest;
 import com.nexus.hub.modules.task.dto.TaskPageResponse;
 import com.nexus.hub.modules.task.dto.TaskResponse;
+import com.nexus.hub.modules.task.entity.TaskStatus;
 import com.nexus.hub.modules.task.service.TaskService;
+import com.nexus.hub.modules.task.service.TaskStreamHub;
 import com.nexus.hub.security.UserPrincipal;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.UUID;
 
@@ -23,6 +27,7 @@ import java.util.UUID;
 public class TaskController {
 
     private final TaskService taskService;
+    private final TaskStreamHub taskStreamHub;
 
     @PostMapping
     public ResponseEntity<ApiResponse<TaskResponse>> submitTask(
@@ -41,6 +46,21 @@ public class TaskController {
     ) {
         TaskResponse response = taskService.getTaskById(principal, taskId);
         return ResponseEntity.ok(ApiResponse.success(response, "Task retrieved successfully"));
+    }
+
+    @GetMapping(value = "/{taskId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamTask(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable UUID taskId
+    ) {
+        // Enforce strict multi-tenant validation before establishing SSE stream
+        TaskResponse task = taskService.getTaskById(principal, taskId);
+        SseEmitter emitter = taskStreamHub.registerClient(taskId, 300_000L);
+        if (task.getStatus() == TaskStatus.COMPLETED || task.getStatus() == TaskStatus.FAILED) {
+            taskStreamHub.broadcastEvent(taskId, "TASK_COMPLETED", task);
+            taskStreamHub.completeStream(taskId);
+        }
+        return emitter;
     }
 
     @GetMapping

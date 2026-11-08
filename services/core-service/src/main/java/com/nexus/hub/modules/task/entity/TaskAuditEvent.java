@@ -30,6 +30,9 @@ public class TaskAuditEvent {
     @Column(name = "node_type", length = 50)
     private String nodeType;
 
+    @Column(name = "duration_ms")
+    private Long durationMs;
+
     @Column(columnDefinition = "TEXT")
     private String message;
 

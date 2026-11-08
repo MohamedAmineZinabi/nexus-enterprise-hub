@@ -47,6 +47,16 @@ public class AgentTask {
     @Column(name = "result_summary", columnDefinition = "TEXT")
     private String resultSummary;
 
+    @Column(name = "last_active_node", length = 50)
+    private String lastActiveNode;
+
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "result_payload", columnDefinition = "jsonb")
+    private String resultPayload;
+
+    @Column(name = "completed_at")
+    private Instant completedAt;
+
     @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "metadata", columnDefinition = "jsonb")
     private String metadata;

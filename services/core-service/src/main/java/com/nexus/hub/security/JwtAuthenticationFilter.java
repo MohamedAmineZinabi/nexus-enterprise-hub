@@ -34,12 +34,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     ) throws ServletException, IOException {
 
         final String authHeader = request.getHeader("Authorization");
-        if (!StringUtils.hasText(authHeader) || !authHeader.startsWith("Bearer ")) {
+        String jwt = null;
+
+        if (StringUtils.hasText(authHeader) && authHeader.startsWith("Bearer ")) {
+            jwt = authHeader.substring(7);
+        } else if (StringUtils.hasText(request.getParameter("token"))) {
+            // Enterprise support for native browser EventSource (SSE) which cannot pass custom headers
+            jwt = request.getParameter("token");
+        }
+
+        if (!StringUtils.hasText(jwt)) {
             filterChain.doFilter(request, response);
             return;
         }
-
-        final String jwt = authHeader.substring(7);
 
         if (tokenRevocationService.isTokenRevoked(jwt)) {
             log.warn("Blocked request with revoked JWT token");

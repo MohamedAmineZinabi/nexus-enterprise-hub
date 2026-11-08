@@ -26,6 +26,9 @@ public class TaskResponse {
     private TaskStatus status;
     private String prompt;
     private String resultSummary;
+    private String lastActiveNode;
+    private String resultPayload;
+    private Instant completedAt;
     private Long totalTokensUsed;
     private String traceId;
     private Instant createdAt;
@@ -40,6 +43,9 @@ public class TaskResponse {
                 .status(entity.getStatus())
                 .prompt(entity.getPrompt())
                 .resultSummary(entity.getResultSummary())
+                .lastActiveNode(entity.getLastActiveNode())
+                .resultPayload(entity.getResultPayload())
+                .completedAt(entity.getCompletedAt())
                 .totalTokensUsed(entity.getTotalTokensUsed())
                 .traceId(traceId)
                 .createdAt(entity.getCreatedAt())
