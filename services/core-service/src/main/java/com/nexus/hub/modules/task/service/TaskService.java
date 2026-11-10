@@ -20,6 +20,8 @@ import com.nexus.hub.modules.user.repository.UserRepository;
 import com.nexus.hub.security.UserPrincipal;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -103,6 +105,11 @@ public class TaskService {
         return TaskResponse.fromEntity(task, traceId);
     }
 
+    @Cacheable(
+            value = "tasks_cache",
+            key = "#taskId",
+            unless = "#result == null || #result.status != T(com.nexus.hub.modules.task.entity.TaskStatus).COMPLETED"
+    )
     @Transactional(readOnly = true)
     public TaskResponse getTaskById(UserPrincipal principal, UUID taskId) {
         AgentTask task = taskRepository.findById(taskId)

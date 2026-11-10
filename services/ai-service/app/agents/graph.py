@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from app.agents.redis_checkpointer import RedisSaver
 
 from app.core.config import settings
 from app.agents.state import AgentWorkflowState
@@ -63,7 +64,16 @@ def create_agent_graph(checkpointer: Optional[Any] = None):
         }
     )
 
-    cp = checkpointer or MemorySaver()
+    if checkpointer is None:
+        try:
+            cp = RedisSaver()
+            logger.info("Using RedisSaver checkpointer for distributed state persistence under 'agent:checkpoint:{taskId}'.")
+        except Exception as ex:
+            logger.warning(f"Could not initialize RedisSaver: {ex}. Falling back to MemorySaver.")
+            cp = MemorySaver()
+    else:
+        cp = checkpointer
+
     compiled = workflow.compile(checkpointer=cp)
     logger.info("Compiled LangGraph Multi-Agent Workflow StateGraph with checkpointer.")
     return compiled

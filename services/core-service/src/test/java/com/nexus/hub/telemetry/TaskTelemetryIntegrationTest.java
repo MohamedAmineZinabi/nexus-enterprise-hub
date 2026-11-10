@@ -21,6 +21,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.cache.CacheManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.Instant;
@@ -45,6 +46,9 @@ class TaskTelemetryIntegrationTest {
     @Mock
     private TaskStreamHub taskStreamHub;
 
+    @Mock
+    private CacheManager cacheManager;
+
     private ObjectMapper objectMapper;
     private AgentTaskTelemetryConsumer telemetryConsumer;
 
@@ -60,7 +64,8 @@ class TaskTelemetryIntegrationTest {
                 taskRepository,
                 auditEventRepository,
                 taskStreamHub,
-                objectMapper
+                objectMapper,
+                cacheManager
         );
 
         tenantId = UUID.randomUUID();
@@ -115,7 +120,8 @@ class TaskTelemetryIntegrationTest {
     @Test
     @DisplayName("TelemetryConsumer: Process progress event updates task state and records audit log")
     void testProcessProgressEvent() {
-        when(taskRepository.findById(taskId)).thenReturn(Optional.of(testTask));
+        when(taskRepository.existsById(taskId)).thenReturn(true);
+        when(taskRepository.getReferenceById(taskId)).thenReturn(testTask);
 
         TaskProgressEventDto progressEvent = TaskProgressEventDto.builder()
                 .taskId(taskId)
@@ -132,9 +138,7 @@ class TaskTelemetryIntegrationTest {
         telemetryConsumer.onTaskProgress(progressEvent);
 
         // 1. Verify task update
-        assertThat(testTask.getStatus()).isEqualTo(TaskStatus.PROCESSING);
-        assertThat(testTask.getLastActiveNode()).isEqualTo("RESEARCHER");
-        verify(taskRepository, times(1)).save(testTask);
+        verify(taskRepository, times(1)).updateProgressState(taskId, "RESEARCHER");
 
         // 2. Verify audit event persistence
         ArgumentCaptor<TaskAuditEvent> auditCaptor = ArgumentCaptor.forClass(TaskAuditEvent.class);
@@ -156,7 +160,7 @@ class TaskTelemetryIntegrationTest {
         when(taskRepository.findById(taskId)).thenReturn(Optional.of(testTask));
 
         String mockReport = "# Compliance Report\nAll policies verified with zero violations.";
-        List<Map<String, Object>> mockCitations = List.of(
+        List<Object> mockCitations = List.of(
                 Map.of("citationId", "cit-1", "documentId", UUID.randomUUID().toString())
         );
 

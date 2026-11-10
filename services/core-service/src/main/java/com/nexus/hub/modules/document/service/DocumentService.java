@@ -18,6 +18,8 @@ import com.nexus.hub.modules.user.repository.UserRepository;
 import com.nexus.hub.security.UserPrincipal;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -63,6 +65,7 @@ public class DocumentService {
         this.sharedUploadsDir = sharedUploadsDir;
     }
 
+    @CacheEvict(value = "documents_cache", key = "#principal.tenantId")
     @Transactional
     public DocumentUploadResponse uploadAndIngest(
             UserPrincipal principal,
@@ -212,6 +215,7 @@ public class DocumentService {
                 .build();
     }
 
+    @Cacheable(value = "documents_cache", key = "#principal.tenantId")
     @Transactional(readOnly = true)
     public List<DocumentResponse> listDocuments(UserPrincipal principal) {
         return documentRepository.findByTenantIdOrderByCreatedAtDesc(principal.getTenantId())
@@ -226,6 +230,7 @@ public class DocumentService {
                 .map(DocumentResponse::from);
     }
 
+    @CacheEvict(value = "documents_cache", key = "#principal.tenantId")
     @Transactional
     public void deleteDocument(UserPrincipal principal, UUID documentId) {
         Document document = documentRepository.findByIdAndTenantId(documentId, principal.getTenantId())

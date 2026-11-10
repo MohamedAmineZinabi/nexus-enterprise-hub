@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.agents.graph import get_agent_graph
 from app.agents.state import AgentWorkflowState
 from app.kafka.producer import get_event_publisher
+from app.db.redis import distributed_task_lock, save_task_state
 
 logger = logging.getLogger("nexus.kafka.consumer")
 
@@ -111,85 +112,125 @@ class KafkaTaskConsumer:
 
             logger.info(f"[Kafka Consumer] Received task: id='{task_id}', tenant='{tenant_id}', prompt='{prompt}'")
 
-            # 1. Publish initial started event
-            await publisher.publish_event(
-                task_id=task_id,
-                tenant_id=tenant_id,
-                node_type="WORKFLOW",
-                phase="STARTED",
-                message=f"Received task: '{prompt}'",
-                trace_id=trace_id
-            )
-
-            # 2. Build initial state and run graph
-            initial_state: AgentWorkflowState = {
-                "task_id": task_id,
-                "tenant_id": tenant_id,
-                "user_prompt": prompt,
-                "trace_id": trace_id,
-                "document_ids": [str(d) for d in doc_ids],
-                "metadata": meta,
-                "plan": [],
-                "research_data": [],
-                "draft_report": "",
-                "critique": {},
-                "iteration_count": 0,
-                "current_node": "START",
-                "status": "PROCESSING"
-            }
-
-            config = {"configurable": {"thread_id": task_id}}
-            final_report = ""
-            citations = []
-
-            # 3. Stream transitions across Planner -> Researcher -> Synthesizer -> Critic
-            async for step_output in graph.astream(initial_state, config=config):
-                for node_name, node_state in step_output.items():
-                    node_status = node_state.get("status", "IN_PROGRESS")
-                    msg_text = f"Node '{node_name}' finished: status={node_status}"
-
-                    if node_name == "planner":
-                        plan_steps = node_state.get("plan", [])
-                        msg_text = f"Planner decomposed prompt into {len(plan_steps)} sub-tasks."
-                    elif node_name == "researcher":
-                        r_data = node_state.get("research_data", [])
-                        msg_text = f"Researcher retrieved {len(r_data)} factual context items."
-                        citations = [item.get("citation") for item in r_data if item.get("citation")]
-                    elif node_name == "synthesizer":
-                        final_report = node_state.get("draft_report", "")
-                        msg_text = f"Synthesizer produced executive report ({len(final_report)} characters)."
-                    elif node_name == "critic":
-                        crit = node_state.get("critique", {})
-                        msg_text = f"Critic evaluated draft: is_valid={crit.get('is_valid')}, score={crit.get('hallucination_score')}"
-
-                    await publisher.publish_event(
-                        task_id=task_id,
-                        tenant_id=tenant_id,
-                        node_type=node_name,
-                        phase="COMPLETED",
-                        message=msg_text,
-                        payload={
-                            "current_node": node_name,
-                            "status": node_status,
-                            "iteration": node_state.get("iteration_count", 0)
-                        },
-                        trace_id=trace_id
+            # Acquire distributed lock before executing task to ensure idempotency
+            async with distributed_task_lock(task_id, timeout_seconds=120) as lock:
+                if not lock.acquired:
+                    logger.warning(
+                        f"[Kafka Consumer] Task '{task_id}' is already locked or running on another worker. "
+                        f"Skipping duplicate execution to enforce strict idempotency."
                     )
+                    return
 
-            # 4. Publish final completion event
-            await publisher.publish_completed(
-                task_id=task_id,
-                tenant_id=tenant_id,
-                draft_report=final_report,
-                execution_status="COMPLETED",
-                citations=citations,
-                trace_id=trace_id
-            )
-            logger.info(f"[Kafka Consumer] Successfully completed and published task '{task_id}'")
+                # Persist active task state in Redis with 24h TTL
+                await save_task_state(task_id, {
+                    "task_id": task_id,
+                    "tenant_id": tenant_id,
+                    "prompt": prompt,
+                    "status": "PROCESSING",
+                    "trace_id": trace_id
+                }, ttl_seconds=86400)
+
+                # 1. Publish initial started event
+                await publisher.publish_event(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    node_type="WORKFLOW",
+                    phase="STARTED",
+                    message=f"Received task: '{prompt}'",
+                    trace_id=trace_id
+                )
+
+                # 2. Build initial state and run graph
+                initial_state: AgentWorkflowState = {
+                    "task_id": task_id,
+                    "tenant_id": tenant_id,
+                    "user_prompt": prompt,
+                    "trace_id": trace_id,
+                    "document_ids": [str(d) for d in doc_ids],
+                    "metadata": meta,
+                    "plan": [],
+                    "research_data": [],
+                    "draft_report": "",
+                    "critique": {},
+                    "iteration_count": 0,
+                    "current_node": "START",
+                    "status": "PROCESSING"
+                }
+
+                config = {"configurable": {"thread_id": task_id}}
+                final_report = ""
+                citations = []
+
+                # 3. Stream transitions across Planner -> Researcher -> Synthesizer -> Critic
+                async for step_output in graph.astream(initial_state, config=config):
+                    for node_name, node_state in step_output.items():
+                        node_status = node_state.get("status", "IN_PROGRESS")
+                        msg_text = f"Node '{node_name}' finished: status={node_status}"
+
+                        if node_name == "planner":
+                            plan_steps = node_state.get("plan", [])
+                            msg_text = f"Planner decomposed prompt into {len(plan_steps)} sub-tasks."
+                        elif node_name == "researcher":
+                            r_data = node_state.get("research_data", [])
+                            msg_text = f"Researcher retrieved {len(r_data)} factual context items."
+                            citations = [item.get("citation") for item in r_data if item.get("citation")]
+                        elif node_name == "synthesizer":
+                            final_report = node_state.get("draft_report", "")
+                            msg_text = f"Synthesizer produced executive report ({len(final_report)} characters)."
+                        elif node_name == "critic":
+                            crit = node_state.get("critique", {})
+                            msg_text = f"Critic evaluated draft: is_valid={crit.get('is_valid')}, score={crit.get('hallucination_score')}"
+
+                        await publisher.publish_event(
+                            task_id=task_id,
+                            tenant_id=tenant_id,
+                            node_type=node_name,
+                            phase="COMPLETED",
+                            message=msg_text,
+                            payload={
+                                "current_node": node_name,
+                                "status": node_status,
+                                "iteration": node_state.get("iteration_count", 0)
+                            },
+                            trace_id=trace_id
+                        )
+
+                # 4. Publish final completion event
+                await publisher.publish_completed(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    draft_report=final_report,
+                    execution_status="COMPLETED",
+                    citations=citations,
+                    trace_id=trace_id
+                )
+
+                # Persist completed task metadata in Redis with 24h TTL
+                await save_task_state(task_id, {
+                    "task_id": task_id,
+                    "tenant_id": tenant_id,
+                    "prompt": prompt,
+                    "status": "COMPLETED",
+                    "report": final_report,
+                    "citations": citations,
+                    "trace_id": trace_id
+                }, ttl_seconds=86400)
+
+                logger.info(f"[Kafka Consumer] Successfully completed and published task '{task_id}'")
 
         except Exception as exc:
             err_trace = traceback.format_exc()
             logger.error(f"[Kafka Consumer] Unrecoverable error processing task '{task_id}': {exc}\n{err_trace}")
+            try:
+                await save_task_state(task_id, {
+                    "task_id": task_id,
+                    "tenant_id": tenant_id,
+                    "status": "FAILED",
+                    "error": str(exc),
+                    "trace_id": trace_id
+                }, ttl_seconds=86400)
+            except Exception:
+                pass
             try:
                 await publisher.publish_dlq(
                     task_id=task_id,

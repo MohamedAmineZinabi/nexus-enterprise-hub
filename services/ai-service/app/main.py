@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.db.qdrant import get_qdrant_client, init_qdrant_collection
+from app.db.redis import get_redis_client, close_redis_client
 from app.rag.embeddings import get_embedding_service
 from app.rag.reranker import get_reranker
 from app.rag.retriever import get_hybrid_retriever
@@ -78,6 +79,7 @@ async def lifespan(app: FastAPI):
     await task_consumer.stop()
     await event_publisher.stop()
     await mcp_manager.close()
+    await close_redis_client()
     await stop_grpc_server(grace=3.0)
     try:
         await grpc_task

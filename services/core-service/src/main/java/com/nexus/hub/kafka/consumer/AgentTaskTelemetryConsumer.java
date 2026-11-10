@@ -12,6 +12,7 @@ import com.nexus.hub.modules.task.service.TaskStreamHub;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.cache.CacheManager;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
@@ -32,6 +33,7 @@ public class AgentTaskTelemetryConsumer {
     private final TaskAuditEventRepository auditEventRepository;
     private final TaskStreamHub taskStreamHub;
     private final ObjectMapper objectMapper;
+    private final CacheManager cacheManager;
 
     /**
      * Listens to intermediate node transitions from the AI service multi-agent graph.
@@ -60,6 +62,13 @@ public class AgentTaskTelemetryConsumer {
 
         // 1. Atomically update task progress state in PostgreSQL if not already in terminal status
         taskRepository.updateProgressState(taskId, event.getNodeName());
+
+        // Invalidate task cache to ensure fresh state
+        try {
+            if (cacheManager != null && cacheManager.getCache("tasks_cache") != null) {
+                cacheManager.getCache("tasks_cache").evict(taskId);
+            }
+        } catch (Exception ignored) {}
 
         // 2. Persist audit telemetry event
         String payloadJson = null;
@@ -138,6 +147,13 @@ public class AgentTaskTelemetryConsumer {
         }
 
         taskRepository.save(task);
+
+        // Invalidate task cache
+        try {
+            if (cacheManager != null && cacheManager.getCache("tasks_cache") != null) {
+                cacheManager.getCache("tasks_cache").evict(taskId);
+            }
+        } catch (Exception ignored) {}
 
         // 2. Persist audit telemetry event
         TaskAuditEvent auditEvent = TaskAuditEvent.builder()
