@@ -209,7 +209,7 @@ export class ShellComponent {
 
   readonly navItems: NavItem[] = [
     { label: 'Executive Dashboard', route: '/dashboard', icon: 'dashboard' },
-    { label: 'Knowledge Base / RAG', route: '/knowledge-base', icon: 'knowledge', badge: 'Day 12' },
+    { label: 'Knowledge Base / RAG', route: '/knowledge-base', icon: 'knowledge', badge: 'RAG' },
     { label: 'Agent Studio', route: '/agent-studio', icon: 'agents', badge: 'Day 13' }
   ];
 
