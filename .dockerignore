@@ -1,0 +1,13 @@
+.git
+.github
+.env
+deploy
+scripts
+*.md
+services/frontend/node_modules
+services/frontend/dist
+services/frontend/.angular
+services/core-service/target
+**/__pycache__
+**/.pytest_cache
+**/*.pyc

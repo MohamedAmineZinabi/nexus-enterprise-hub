@@ -1,0 +1,35 @@
+name: CI - Core Service (Spring Boot 3 & Protobuf)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/core-service/**'
+      - 'proto/**'
+      - '.github/workflows/ci-core-service.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/core-service/**'
+      - 'proto/**'
+      - '.github/workflows/ci-core-service.yml'
+
+jobs:
+  build-and-test:
+    name: Compile Protobuf & Run Maven Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Compile Protobuf contracts, Java sources, and run tests
+        working-directory: services/core-service
+        run: mvn -B clean test

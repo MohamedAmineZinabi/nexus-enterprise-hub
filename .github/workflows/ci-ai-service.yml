@@ -1,0 +1,47 @@
+name: CI - AI Service (FastAPI, LangGraph & RAG)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/ai-service/**'
+      - 'proto/**'
+      - '.github/workflows/ci-ai-service.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/ai-service/**'
+      - 'proto/**'
+      - '.github/workflows/ci-ai-service.yml'
+
+jobs:
+  lint-and-test:
+    name: Lint (Ruff) & Run Pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: services/ai-service/requirements.txt
+
+      - name: Install Python dependencies & Ruff
+        working-directory: services/ai-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint AI Service with Ruff
+        working-directory: services/ai-service
+        run: ruff check app tests --select E9,F63,F7,F82
+
+      - name: Run AI Service unit & DLQ/MCP pytest suite
+        working-directory: services/ai-service
+        run: pytest tests/test_kafka_dlq.py tests/test_mcp_integration.py -v
