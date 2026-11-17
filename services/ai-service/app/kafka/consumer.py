@@ -1,10 +1,13 @@
 import json
+import re
+import uuid
 import asyncio
 import logging
 import traceback
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from aiokafka import AIOKafkaConsumer
+from aiokafka.structs import TopicPartition, OffsetAndMetadata
 from app.core.config import settings
 from app.agents.graph import get_agent_graph
 from app.agents.state import AgentWorkflowState
@@ -13,11 +16,26 @@ from app.db.redis import distributed_task_lock, save_task_state
 
 logger = logging.getLogger("nexus.kafka.consumer")
 
+UUID_FALLBACK_PATTERN = re.compile(r'"task(?:Id|_id)"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"')
+
+
+def _is_valid_uuid(value: str) -> bool:
+    """Checks whether a string represents a valid RFC 4122 UUID."""
+    if not value:
+        return False
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
 
 class KafkaTaskConsumer:
     """
     Asynchronous Kafka Consumer subscribing to `agent.task.requested`.
-    Orchestrates the LangGraph multi-agent loop and streams intermediate events.
+    Orchestrates the LangGraph multi-agent loop, routes poison-pill / unrecoverable
+    failures to `agent.task.dlq`, emits FAILED outcomes to `agent.task.completed`,
+    and commits offsets explicitly so partitions never stall.
     """
 
     def __init__(self, bootstrap_servers: Optional[str] = None):
@@ -57,7 +75,7 @@ class KafkaTaskConsumer:
         logger.info("[Kafka Consumer] Stopped.")
 
     async def _run_consumer_loop(self):
-        """Continuous consumption loop with retry backoff for network resilience."""
+        """Continuous consumption loop with explicit offset commits and retry backoff."""
         publisher = get_event_publisher()
         graph = get_agent_graph()
 
@@ -72,7 +90,7 @@ class KafkaTaskConsumer:
                     bootstrap_servers=self.bootstrap_servers,
                     group_id=self.group_id,
                     auto_offset_reset="earliest",
-                    enable_auto_commit=True
+                    enable_auto_commit=False
                 )
                 await self.consumer.start()
                 logger.info("[Kafka Consumer] Successfully connected and listening for task requests.")
@@ -80,8 +98,33 @@ class KafkaTaskConsumer:
                 async for msg in self.consumer:
                     if not self._running:
                         break
-                    raw_str = msg.value.decode("utf-8")
-                    await self._process_task_message(raw_str, graph, publisher)
+                    try:
+                        raw_str = (
+                            msg.value.decode("utf-8", errors="replace")
+                            if isinstance(msg.value, (bytes, bytearray))
+                            else (str(msg.value) if msg.value is not None else "")
+                        )
+                        msg_meta = {
+                            "topic": msg.topic,
+                            "partition": msg.partition,
+                            "offset": msg.offset,
+                            "headers": {
+                                str(k): (
+                                    v.decode("utf-8", errors="replace")
+                                    if isinstance(v, (bytes, bytearray))
+                                    else str(v)
+                                )
+                                for k, v in (msg.headers or [])
+                            },
+                        }
+                        await self._process_task_message(raw_str, graph, publisher, msg_meta=msg_meta)
+                    except Exception as loop_exc:
+                        logger.error(
+                            f"[Kafka Consumer] Unhandled consumer loop exception at "
+                            f"partition={msg.partition}, offset={msg.offset}: {loop_exc}"
+                        )
+                    finally:
+                        await self._commit_record_offset(msg)
 
             except asyncio.CancelledError:
                 break
@@ -95,20 +138,49 @@ class KafkaTaskConsumer:
                     self.consumer = None
                 await asyncio.sleep(5)
 
-    async def _process_task_message(self, raw_str: str, graph, publisher):
-        """Processes a single task request, streaming LangGraph transitions to Kafka."""
+    async def _commit_record_offset(self, msg):
+        """Commits the offset for a processed or DLQ-routed record cleanly."""
+        if self.consumer is None:
+            return
+        try:
+            tp = TopicPartition(msg.topic, msg.partition)
+            await self.consumer.commit({tp: OffsetAndMetadata(msg.offset + 1, "")})
+        except Exception as commit_err:
+            logger.warning(
+                f"[Kafka Consumer] Failed to commit offset {msg.offset + 1} on "
+                f"{msg.topic}-{msg.partition}: {commit_err}"
+            )
+
+    async def _process_task_message(
+        self,
+        raw_str: str,
+        graph,
+        publisher,
+        msg_meta: Optional[Dict[str, Any]] = None
+    ):
+        """Processes a single task request, routing poison-pills and graph failures to DLQ."""
         task_id = "unknown"
         tenant_id = "default"
         trace_id = "trace-unknown"
 
         try:
             data = json.loads(raw_str)
-            task_id = str(data.get("taskId") or data.get("task_id") or "")
-            tenant_id = str(data.get("tenantId") or data.get("tenant_id") or "default")
+            if not isinstance(data, dict):
+                raise ValueError(f"Malformed message payload: expected JSON object, got {type(data).__name__}")
+
+            task_id = str(data.get("taskId") or data.get("task_id") or "").strip()
+            tenant_id = str(data.get("tenantId") or data.get("tenant_id") or "default").strip()
             prompt = data.get("prompt") or data.get("user_prompt") or ""
-            trace_id = data.get("traceId") or data.get("trace_id") or f"trace-{task_id}"
+            trace_id = str(data.get("traceId") or data.get("trace_id") or f"trace-{task_id or 'unknown'}")
             doc_ids = data.get("documentIds") or data.get("document_ids") or []
             meta = data.get("metadata") or {}
+
+            if not task_id:
+                task_id = "unknown"
+                raise ValueError("Poison-pill message: missing required 'taskId' field")
+
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError(f"Invalid task request '{task_id}': missing or blank 'prompt'")
 
             logger.info(f"[Kafka Consumer] Received task: id='{task_id}', tenant='{tenant_id}', prompt='{prompt}'")
 
@@ -220,27 +292,66 @@ class KafkaTaskConsumer:
 
         except Exception as exc:
             err_trace = traceback.format_exc()
-            logger.error(f"[Kafka Consumer] Unrecoverable error processing task '{task_id}': {exc}\n{err_trace}")
-            try:
-                await save_task_state(task_id, {
-                    "task_id": task_id,
-                    "tenant_id": tenant_id,
-                    "status": "FAILED",
-                    "error": str(exc),
-                    "trace_id": trace_id
-                }, ttl_seconds=86400)
-            except Exception:
-                pass
+            error_type = type(exc).__name__
+
+            # Attempt regex UUID recovery in case of malformed truncated JSON containing taskId
+            if task_id == "unknown" and raw_str:
+                match = UUID_FALLBACK_PATTERN.search(raw_str)
+                if match:
+                    task_id = match.group(1)
+
+            logger.error(
+                f"[Kafka Consumer] Poison-pill or unrecoverable error processing task '{task_id}' "
+                f"({error_type}): {exc}\n{err_trace}"
+            )
+
+            if task_id != "unknown":
+                try:
+                    await save_task_state(task_id, {
+                        "task_id": task_id,
+                        "tenant_id": tenant_id,
+                        "status": "FAILED",
+                        "errorType": error_type,
+                        "error": str(exc),
+                        "trace_id": trace_id
+                    }, ttl_seconds=86400)
+                except Exception as redis_err:
+                    logger.warning(f"[Kafka Consumer] Failed to save FAILED state in Redis for '{task_id}': {redis_err}")
+
+            # Route structured failure record to Dead Letter Queue (agent.task.dlq)
             try:
                 await publisher.publish_dlq(
                     task_id=task_id,
                     tenant_id=tenant_id,
                     error=str(exc),
+                    error_type=error_type,
+                    trace_id=trace_id,
                     stack_trace=err_trace,
-                    raw_message=raw_str
+                    raw_message=raw_str,
+                    source_topic=(msg_meta or {}).get("topic", self.topic),
+                    partition=(msg_meta or {}).get("partition"),
+                    offset=(msg_meta or {}).get("offset"),
+                    headers=(msg_meta or {}).get("headers"),
                 )
             except Exception as dlq_err:
                 logger.error(f"[Kafka Consumer] Failed to route to DLQ: {dlq_err}")
+
+            # Notify core-service PostgreSQL & SSE clients immediately when taskId is a valid UUID
+            if _is_valid_uuid(task_id):
+                try:
+                    await publisher.publish_completed(
+                        task_id=task_id,
+                        tenant_id=tenant_id,
+                        draft_report="",
+                        execution_status="FAILED",
+                        citations=[],
+                        trace_id=trace_id,
+                        error_details=f"[{error_type}] {exc}"
+                    )
+                except Exception as notify_err:
+                    logger.error(
+                        f"[Kafka Consumer] Failed to publish FAILED completion event for task '{task_id}': {notify_err}"
+                    )
 
 
 # Global singleton instance
@@ -253,4 +364,3 @@ def get_task_consumer() -> KafkaTaskConsumer:
     if _task_consumer is None:
         _task_consumer = KafkaTaskConsumer()
     return _task_consumer
-

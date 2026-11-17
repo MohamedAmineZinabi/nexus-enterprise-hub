@@ -5,6 +5,9 @@ import com.nexus.hub.common.exception.AiServiceTimeoutException;
 import com.nexus.hub.common.exception.AiServiceUnavailableException;
 import com.nexus.hub.grpc.ai.v1.*;
 import com.nexus.hub.grpc.common.TenantContext;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -24,6 +27,9 @@ import java.util.function.Consumer;
 @Component
 public class AgentGrpcClient {
 
+    private static final String CB_NAME = "aiServiceGrpc";
+    private static final String RETRY_NAME = "aiServiceRetry";
+
     private final AgentServiceGrpc.AgentServiceBlockingStub agentBlockingStub;
     private final AgentServiceGrpc.AgentServiceStub agentAsyncStub;
     private final GrpcContextHelper contextHelper;
@@ -40,11 +46,25 @@ public class AgentGrpcClient {
         this.deadlineMs = deadlineMs;
     }
 
+    @CircuitBreaker(name = CB_NAME, fallbackMethod = "executeAgentSyncShortFallback")
+    @Retry(name = RETRY_NAME)
     public AgentQueryResponse executeAgentSync(String query, String sessionId) {
-        return executeAgentSync(query, sessionId, UUID.randomUUID().toString(), Collections.emptyList(), Collections.emptyMap(), false);
+        return doExecuteAgentSync(query, sessionId, UUID.randomUUID().toString(), Collections.emptyList(), Collections.emptyMap(), false);
     }
 
+    @CircuitBreaker(name = CB_NAME, fallbackMethod = "executeAgentSyncFallback")
+    @Retry(name = RETRY_NAME)
     public AgentQueryResponse executeAgentSync(
+            String query,
+            String sessionId,
+            String taskId,
+            List<String> mcpToolsEnabled,
+            Map<String, String> sessionParams,
+            boolean enableCritic) {
+        return doExecuteAgentSync(query, sessionId, taskId, mcpToolsEnabled, sessionParams, enableCritic);
+    }
+
+    private AgentQueryResponse doExecuteAgentSync(
             String query,
             String sessionId,
             String taskId,
@@ -77,6 +97,8 @@ public class AgentGrpcClient {
         }
     }
 
+    @CircuitBreaker(name = CB_NAME, fallbackMethod = "listMcpToolsFallback")
+    @Retry(name = RETRY_NAME)
     public ListMcpToolsResponse listMcpTools() {
         TenantContext context = contextHelper.buildTenantContext();
         ListMcpToolsRequest request = ListMcpToolsRequest.newBuilder()
@@ -91,6 +113,7 @@ public class AgentGrpcClient {
         }
     }
 
+    @CircuitBreaker(name = CB_NAME, fallbackMethod = "streamAgentWorkflowFallback")
     public void streamAgentWorkflow(
             String query,
             String taskId,
@@ -139,6 +162,51 @@ public class AgentGrpcClient {
                 }
             }
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // Resilience4j CircuitBreaker Fallbacks (Invoked when circuit state is OPEN)
+    // -------------------------------------------------------------------------
+
+    @SuppressWarnings("unused")
+    private AgentQueryResponse executeAgentSyncShortFallback(
+            String query, String sessionId, CallNotPermittedException ex) {
+        throw openCircuitException("executeAgentSync", ex);
+    }
+
+    @SuppressWarnings("unused")
+    private AgentQueryResponse executeAgentSyncFallback(
+            String query,
+            String sessionId,
+            String taskId,
+            List<String> mcpToolsEnabled,
+            Map<String, String> sessionParams,
+            boolean enableCritic,
+            CallNotPermittedException ex) {
+        throw openCircuitException("executeAgentSync", ex);
+    }
+
+    @SuppressWarnings("unused")
+    private ListMcpToolsResponse listMcpToolsFallback(CallNotPermittedException ex) {
+        throw openCircuitException("listMcpTools", ex);
+    }
+
+    @SuppressWarnings("unused")
+    private void streamAgentWorkflowFallback(
+            String query,
+            String taskId,
+            List<String> mcpToolsEnabled,
+            Consumer<AgentWorkflowEvent> eventConsumer,
+            Consumer<Throwable> errorConsumer,
+            Runnable completionHandler,
+            CallNotPermittedException ex) {
+        throw openCircuitException("streamAgentWorkflow", ex);
+    }
+
+    private AiServiceUnavailableException openCircuitException(String operation, CallNotPermittedException ex) {
+        log.warn("CircuitBreaker '{}' is OPEN. Fast-failing Agent gRPC operation '{}': {}", CB_NAME, operation, ex.getMessage());
+        return new AiServiceUnavailableException(
+                "AI Service is temporarily unavailable (circuit breaker OPEN) during " + operation + ": " + ex.getMessage());
     }
 
     private RuntimeException handleStatusRuntimeException(String operation, StatusRuntimeException e) {

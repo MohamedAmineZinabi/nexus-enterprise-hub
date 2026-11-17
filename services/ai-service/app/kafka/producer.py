@@ -82,13 +82,14 @@ class AgentEventPublisher:
         draft_report: str,
         execution_status: str = "COMPLETED",
         citations: Optional[List[Any]] = None,
-        trace_id: str = ""
+        trace_id: str = "",
+        error_details: Optional[str] = None
     ):
-        """Publishes the finalized report to `agent.task.completed`."""
+        """Publishes the finalized or failed execution outcome to `agent.task.completed`."""
         if not self._started or not self.producer:
             await self.start()
 
-        event = {
+        event: Dict[str, Any] = {
             "taskId": task_id,
             "tenantId": tenant_id,
             "traceId": trace_id,
@@ -98,11 +99,16 @@ class AgentEventPublisher:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "timestampMs": int(time.time() * 1000)
         }
+        if error_details is not None:
+            event["errorDetails"] = error_details
 
         topic = settings.kafka_topic_task_completed
         key = task_id
         await self.producer.send_and_wait(topic, value=event, key=key)
-        logger.info(f"[Kafka Producer] Published completion event for task='{task_id}' to topic '{topic}'")
+        logger.info(
+            f"[Kafka Producer] Published completion event for task='{task_id}' "
+            f"(status='{execution_status}') to topic '{topic}'"
+        )
 
     async def publish_dlq(
         self,
@@ -110,18 +116,31 @@ class AgentEventPublisher:
         tenant_id: str,
         error: str,
         stack_trace: str = "",
-        raw_message: str = ""
+        raw_message: str = "",
+        error_type: str = "ProcessingError",
+        trace_id: str = "",
+        source_topic: str = "",
+        partition: Optional[int] = None,
+        offset: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None
     ):
-        """Routes unrecoverable task failures to `agent.task.dlq`."""
+        """Routes poison-pill and unrecoverable task failures to `agent.task.dlq`."""
         if not self._started or not self.producer:
             await self.start()
 
         event = {
             "taskId": task_id,
             "tenantId": tenant_id,
+            "traceId": trace_id,
+            "errorType": error_type,
             "error": error,
             "stackTrace": stack_trace,
             "rawMessage": raw_message,
+            "sourceTopic": source_topic or settings.kafka_topic_task_requested,
+            "partition": partition,
+            "offset": offset,
+            "headers": headers or {},
+            "sourceService": "ai-service",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "timestampMs": int(time.time() * 1000)
         }
@@ -129,7 +148,10 @@ class AgentEventPublisher:
         topic = settings.kafka_topic_task_dlq
         key = task_id or "dlq-error"
         await self.producer.send_and_wait(topic, value=event, key=key)
-        logger.error(f"[Kafka Producer] Routed failed task='{task_id}' to DLQ topic '{topic}': {error}")
+        logger.error(
+            f"[Kafka Producer] Routed failed task='{task_id}' (type='{error_type}') "
+            f"to DLQ topic '{topic}': {error}"
+        )
 
 
 # Global singleton instance
@@ -142,4 +164,3 @@ def get_event_publisher() -> AgentEventPublisher:
     if _event_publisher is None:
         _event_publisher = AgentEventPublisher()
     return _event_publisher
-

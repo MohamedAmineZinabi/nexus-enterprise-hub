@@ -61,6 +61,57 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
 
+# Management & Observability (Actuator + Resilience4j Health & Circuit Breakers)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,circuitbreakers,circuitbreakerevents,retries,retryevents,metrics
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+
+# Resilience4j Fault Tolerance Policies
+resilience4j:
+  circuitbreaker:
+    circuitBreakerAspectOrder: 1
+    configs:
+      default:
+        registerHealthIndicator: true
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        waitDurationInOpenState: 15s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        recordExceptions:
+          - com.nexus.hub.common.exception.AiServiceUnavailableException
+          - com.nexus.hub.common.exception.AiServiceTimeoutException
+          - io.grpc.StatusRuntimeException
+        ignoreExceptions:
+          - com.nexus.hub.common.exception.BadRequestException
+    instances:
+      aiServiceGrpc:
+        baseConfig: default
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        waitDurationInOpenState: 15s
+        permittedNumberOfCallsInHalfOpenState: 3
+  retry:
+    retryAspectOrder: 2
+    instances:
+      aiServiceRetry:
+        maxAttempts: 2
+        waitDuration: 500ms
+        retryExceptions:
+          - com.nexus.hub.common.exception.AiServiceUnavailableException
+
 # Application-Specific Enterprise Tokens & Configurations
 nexus:
   security:
@@ -68,6 +119,10 @@ nexus:
       # 256-bit Hex Key for HMAC-SHA256
       secret: ${JWT_SECRET:4e65787573456e746572707269736548756253757065725365637265744b6579323032362140232425}
       expiration-ms: 86400000 # 24 Hours
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    requests-per-minute: ${RATE_LIMIT_RPM:30}
+    window-seconds: ${RATE_LIMIT_WINDOW_SECONDS:60}
   storage:
     shared-uploads-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
     upload-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
@@ -77,6 +132,10 @@ nexus:
       agent-task-events: ${KAFKA_TOPIC_AGENT_TASK_EVENTS:agent.task.events}
       agent-task-completed: ${KAFKA_TOPIC_AGENT_TASK_COMPLETED:agent.task.completed}
       agent-task-dlq: ${KAFKA_TOPIC_AGENT_TASK_DLQ:agent.task.dlq}
+    dlq:
+      backoff-initial-interval-ms: ${KAFKA_DLQ_BACKOFF_INITIAL_MS:1000}
+      backoff-multiplier: ${KAFKA_DLQ_BACKOFF_MULTIPLIER:2.0}
+      backoff-max-attempts: ${KAFKA_DLQ_BACKOFF_MAX_ATTEMPTS:3}
   grpc:
     ai-service:
       host: ${AI_SERVICE_GRPC_HOST:ai-service}

@@ -2,6 +2,7 @@ package com.nexus.hub.security;
 
 import com.nexus.hub.modules.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -32,6 +33,7 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthFilter;
+    private final TenantRateLimitFilter tenantRateLimitFilter;
     private final UserRepository userRepository;
 
     @Bean
@@ -55,9 +57,17 @@ public class SecurityConfig {
                     response.getWriter().write("{\"success\":false,\"message\":\"Full authentication is required to access this resource\"}");
                 }))
                 .authenticationProvider(authenticationProvider())
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(tenantRateLimitFilter, JwtAuthenticationFilter.class);
 
         return http.build();
+    }
+
+    @Bean
+    public FilterRegistrationBean<TenantRateLimitFilter> tenantRateLimitFilterRegistration(TenantRateLimitFilter filter) {
+        FilterRegistrationBean<TenantRateLimitFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     @Bean
@@ -91,6 +101,7 @@ public class SecurityConfig {
         configuration.setAllowedOrigins(List.of("http://localhost:4200", "http://localhost:80"));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Trace-Id"));
+        configuration.setExposedHeaders(List.of("X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"));
         configuration.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

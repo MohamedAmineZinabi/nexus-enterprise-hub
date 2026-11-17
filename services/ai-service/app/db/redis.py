@@ -14,6 +14,7 @@ logger = logging.getLogger("nexus.db.redis")
 # Global clients & connection pools
 _async_redis_client: Optional[aioredis.Redis] = None
 _sync_redis_client: Optional[redis.Redis] = None
+_async_redis_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Lua Script: Release lock only if owner token matches
 LUA_RELEASE_LOCK = """
@@ -36,8 +37,13 @@ end
 
 async def get_redis_client() -> aioredis.Redis:
     """Return a singleton asynchronous Redis client connected via connection pool."""
-    global _async_redis_client
+    global _async_redis_client, _async_redis_loop
+    running_loop = asyncio.get_running_loop()
+    if _async_redis_client is not None and _async_redis_loop is not running_loop:
+        # Client was bound to a different (possibly closed) event loop; rebuild it.
+        _async_redis_client = None
     if _async_redis_client is None:
+        _async_redis_loop = running_loop
         logger.info(f"Initializing Async Redis Client to {settings.redis_url}...")
         _async_redis_client = aioredis.from_url(
             settings.redis_url,

@@ -45,10 +45,13 @@ public class AgentTaskTelemetryConsumer {
     )
     @Transactional
     public void onTaskProgress(@Payload(required = false) Object rawEvent) {
+        if (rawEvent == null) {
+            log.debug("Ignoring tombstone null progress event");
+            return;
+        }
         TaskProgressEventDto event = parseProgressEvent(rawEvent);
         if (event == null || event.getTaskId() == null) {
-            log.warn("Received invalid or null progress event: {}", rawEvent);
-            return;
+            throw new IllegalArgumentException("Malformed progress telemetry event: missing required taskId");
         }
         UUID taskId = event.getTaskId();
 
@@ -106,10 +109,13 @@ public class AgentTaskTelemetryConsumer {
     )
     @Transactional
     public void onTaskCompleted(@Payload(required = false) Object rawEvent) {
+        if (rawEvent == null) {
+            log.debug("Ignoring tombstone null completion event");
+            return;
+        }
         TaskCompletedEventDto event = parseCompletedEvent(rawEvent);
         if (event == null || event.getTaskId() == null) {
-            log.warn("Received invalid or null completion event: {}", rawEvent);
-            return;
+            throw new IllegalArgumentException("Malformed completion telemetry event: missing required taskId");
         }
         UUID taskId = event.getTaskId();
 
