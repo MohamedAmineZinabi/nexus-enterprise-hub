@@ -1,4 +1,4 @@
-name: CI - AI Service (FastAPI, LangGraph & RAG)
+name: CI - AI Service (FastAPI, LangGraph, RAG & AI Evals)
 
 on:
   push:
@@ -16,7 +16,7 @@ on:
 
 jobs:
   lint-and-test:
-    name: Lint (Ruff) & Run Pytest
+    name: Lint (Ruff), Unit Tests & AI Evaluation/Red-Teaming Suite
     runs-on: ubuntu-latest
 
     steps:
@@ -33,15 +33,28 @@ jobs:
       - name: Install Python dependencies & Ruff
         working-directory: services/ai-service
         run: |
-          python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-          pip install ruff
+          python -m pip install --upgrade pip uv
+          uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -r requirements.txt ruff
 
       - name: Lint AI Service with Ruff
         working-directory: services/ai-service
         run: ruff check app tests --select E9,F63,F7,F82
 
-      - name: Run AI Service unit & DLQ/MCP pytest suite
+      - name: Run AI Service unit, DLQ & MCP pytest suite
         working-directory: services/ai-service
         run: pytest tests/test_kafka_dlq.py tests/test_mcp_integration.py -v
+
+      - name: Run AI Quality Assurance, Evaluation & Red-Teaming Suite (RAGAS, DeepEval, Giskard)
+        working-directory: services/ai-service
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: pytest tests/evals/ -v
+
+      - name: Upload AI Evaluation & Red-Teaming Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-eval-reports
+          path: services/ai-service/tests/evals/reports/*.json
+          if-no-files-found: warn

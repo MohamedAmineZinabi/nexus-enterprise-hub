@@ -19,9 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install service dependencies
+# Install service dependencies cleanly (using uv + BuildKit cache for fast, deterministic builds)
+RUN pip install --no-cache-dir uv
 COPY services/ai-service/requirements.txt .
-RUN pip install --no-cache-dir --retries 5 -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=180 UV_CONCURRENT_DOWNLOADS=4 uv pip install --system -r requirements.txt
 
 # Pre-cache HuggingFace SentenceTransformer and CrossEncoder models in image
 RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \

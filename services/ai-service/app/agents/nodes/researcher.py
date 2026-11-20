@@ -20,6 +20,14 @@ async def researcher_node(state: AgentWorkflowState) -> Dict[str, Any]:
     plan = state.get("plan", [])
     critique = state.get("critique", {})
 
+    if state.get("status") == "SECURITY_BLOCKED" or state.get("metadata", {}).get("security_blocked"):
+        logger.warning(f"[Researcher] Skipping retrieval for security-blocked task_id='{task_id}'.")
+        return {
+            "research_data": [],
+            "current_node": "researcher",
+            "status": "SECURITY_BLOCKED",
+        }
+
     logger.info(
         f"[Researcher] Executing research for task_id='{task_id}', tenant='{tenant_id}', "
         f"plan_steps={len(plan)}"

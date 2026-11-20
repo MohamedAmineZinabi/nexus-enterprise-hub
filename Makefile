@@ -54,11 +54,16 @@ ai-test:
 	@echo "Running AI Service test suite (pytest)..."
 	docker run --rm --network nexus-network -e REDIS_URL="redis://:nexus_redis_secret_token_2026@nexus-redis:6379/0" --entrypoint pytest -v "${PWD}/services/ai-service:/app" -w /app nexus-hub/ai-service:latest tests/ -v
 
+.PHONY: ai-eval
+ai-eval:
+	@echo "Running AI Evaluation & Red-Teaming Suite (RAGAS, DeepEval, Giskard)..."
+	docker run --rm --entrypoint pytest -v "${PWD}/services/ai-service:/app" -w /app -e OPENAI_API_KEY="${OPENAI_API_KEY}" nexus-hub/ai-service:latest tests/evals/ -v
+
 .PHONY: frontend-build
 frontend-build:
 	@echo "Verifying Frontend production build..."
 	docker run --rm -v "${PWD}/services/frontend:/app" -w /app node:20-alpine sh -c "npm ci && npm run build"
 
 .PHONY: test-all
-test-all: core-test ai-test frontend-build
+test-all: core-test ai-test ai-eval frontend-build
 	@echo "All NexusEnterprise Hub suites passed!"

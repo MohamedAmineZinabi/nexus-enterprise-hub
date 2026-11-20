@@ -1,0 +1,127 @@
+{
+  "framework": "RAGAS",
+  "mode": "local_cpu_neural",
+  "timestamp_utc": "2026-11-20T19:38:27.509829+00:00",
+  "dataset": "NexusEnterprise Hub Golden QA & Red-Teaming Benchmark",
+  "num_cases": 5,
+  "thresholds": {
+    "context_precision": 0.75,
+    "context_recall": 0.8,
+    "faithfulness": 0.8,
+    "answer_relevancy": 0.75
+  },
+  "aggregate_metrics": {
+    "context_precision": 0.9913,
+    "context_recall": 0.9685,
+    "faithfulness": 0.9489,
+    "answer_relevancy": 0.887
+  },
+  "passed": true,
+  "cases": [
+    {
+      "id": "TC-001",
+      "tenant_id": "tenant-alpha-001",
+      "question": "Which embedding model, vector dimension, hybrid blend weight, and cross-encoder reranker does the NexusEnterprise Hub Hybrid RAG pipeline use?",
+      "expected_citations": [
+        "nexus_rag_architecture_spec.pdf [chunk 1]"
+      ],
+      "retrieved_citations": [
+        "nexus_rag_architecture_spec.pdf [chunk 1]",
+        "security_multitenant_standard_2026.pdf [chunk 1]",
+        "multi_agent_langgraph_mcp_guide.pdf [chunk 1]"
+      ],
+      "top_rerank_score": 0.9936,
+      "top_hybrid_score": 0.8869,
+      "metrics": {
+        "context_precision": 0.9984,
+        "context_recall": 0.9653,
+        "faithfulness": 1.0,
+        "answer_relevancy": 0.9105
+      }
+    },
+    {
+      "id": "TC-002",
+      "tenant_id": "tenant-alpha-001",
+      "question": "How does NexusEnterprise Hub enforce multi-tenant vector isolation and authenticate browser Server-Sent Events streams?",
+      "expected_citations": [
+        "security_multitenant_standard_2026.pdf [chunk 1]"
+      ],
+      "retrieved_citations": [
+        "security_multitenant_standard_2026.pdf [chunk 1]",
+        "nexus_rag_architecture_spec.pdf [chunk 1]",
+        "multi_agent_langgraph_mcp_guide.pdf [chunk 1]"
+      ],
+      "top_rerank_score": 0.994,
+      "top_hybrid_score": 0.8275,
+      "metrics": {
+        "context_precision": 0.9985,
+        "context_recall": 0.9738,
+        "faithfulness": 0.9133,
+        "answer_relevancy": 0.8799
+      }
+    },
+    {
+      "id": "TC-003",
+      "tenant_id": "tenant-alpha-001",
+      "question": "How do AI Service workers prevent duplicate Kafka task execution and persist LangGraph state in Redis 7?",
+      "expected_citations": [
+        "redis_distributed_coordination_spec.pdf [chunk 1]"
+      ],
+      "retrieved_citations": [
+        "redis_distributed_coordination_spec.pdf [chunk 1]",
+        "production_hardening_resilience_policy.pdf [chunk 1]",
+        "multi_agent_langgraph_mcp_guide.pdf [chunk 1]"
+      ],
+      "top_rerank_score": 0.9991,
+      "top_hybrid_score": 0.8821,
+      "metrics": {
+        "context_precision": 0.9998,
+        "context_recall": 0.9785,
+        "faithfulness": 0.9177,
+        "answer_relevancy": 0.9132
+      }
+    },
+    {
+      "id": "TC-004",
+      "tenant_id": "tenant-alpha-001",
+      "question": "What Resilience4j circuit breaker thresholds, tenant rate-limiting status code, and Kafka dead-letter queue mechanism harden NexusEnterprise Hub?",
+      "expected_citations": [
+        "production_hardening_resilience_policy.pdf [chunk 1]"
+      ],
+      "retrieved_citations": [
+        "production_hardening_resilience_policy.pdf [chunk 1]",
+        "redis_distributed_coordination_spec.pdf [chunk 1]",
+        "security_multitenant_standard_2026.pdf [chunk 1]"
+      ],
+      "top_rerank_score": 0.8454,
+      "top_hybrid_score": 0.7664,
+      "metrics": {
+        "context_precision": 0.9613,
+        "context_recall": 0.9658,
+        "faithfulness": 0.9137,
+        "answer_relevancy": 0.8475
+      }
+    },
+    {
+      "id": "TC-005",
+      "tenant_id": "tenant-alpha-001",
+      "question": "Which LangGraph nodes, MCP tools, and NGINX proxy directives power real-time multi-agent streaming?",
+      "expected_citations": [
+        "multi_agent_langgraph_mcp_guide.pdf [chunk 1]"
+      ],
+      "retrieved_citations": [
+        "multi_agent_langgraph_mcp_guide.pdf [chunk 1]",
+        "redis_distributed_coordination_spec.pdf [chunk 1]",
+        "security_multitenant_standard_2026.pdf [chunk 1]"
+      ],
+      "top_rerank_score": 0.9933,
+      "top_hybrid_score": 0.8661,
+      "metrics": {
+        "context_precision": 0.9983,
+        "context_recall": 0.959,
+        "faithfulness": 1.0,
+        "answer_relevancy": 0.8837
+      }
+    }
+  ]
+}

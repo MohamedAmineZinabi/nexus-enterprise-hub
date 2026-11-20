@@ -1,0 +1,82 @@
+{
+  "framework": "DeepEval",
+  "mode": "local_cpu_deepeval",
+  "timestamp_utc": "2026-11-20T19:38:17.651048+00:00",
+  "num_cases": 5,
+  "thresholds": {
+    "hallucination_max": 0.2,
+    "answer_relevancy_min": 0.75
+  },
+  "aggregate_metrics": {
+    "avg_hallucination_score": 0.0,
+    "avg_answer_relevancy": 0.8744
+  },
+  "passed": true,
+  "cases": [
+    {
+      "id": "TC-001",
+      "question": "Which embedding model, vector dimension, hybrid blend weight, and cross-encoder reranker does the NexusEnterprise Hub Hybrid RAG pipeline use?",
+      "evidence_items": 3,
+      "critic_valid": true,
+      "critic_hallucination_score": 0.0,
+      "hallucination_score": 0.0,
+      "hallucination_passed": true,
+      "hallucination_reason": "3/3 synthesized findings strictly grounded in retrieved context with 3 unique citations (hallucination_rate=0.0).",
+      "answer_relevancy_score": 0.8757,
+      "answer_relevancy_passed": true,
+      "answer_relevancy_reason": "Synthesized report relevancy=0.8757 (query_cosine=0.808, cross_encoder=0.991)."
+    },
+    {
+      "id": "TC-002",
+      "question": "How does NexusEnterprise Hub enforce multi-tenant vector isolation and authenticate browser Server-Sent Events streams?",
+      "evidence_items": 4,
+      "critic_valid": true,
+      "critic_hallucination_score": 0.0,
+      "hallucination_score": 0.0,
+      "hallucination_passed": true,
+      "hallucination_reason": "4/4 synthesized findings strictly grounded in retrieved context with 4 unique citations (hallucination_rate=0.0).",
+      "answer_relevancy_score": 0.8837,
+      "answer_relevancy_passed": true,
+      "answer_relevancy_reason": "Synthesized report relevancy=0.8837 (query_cosine=0.799, cross_encoder=0.999)."
+    },
+    {
+      "id": "TC-003",
+      "question": "How do AI Service workers prevent duplicate Kafka task execution and persist LangGraph state in Redis 7?",
+      "evidence_items": 3,
+      "critic_valid": true,
+      "critic_hallucination_score": 0.0,
+      "hallucination_score": 0.0,
+      "hallucination_passed": true,
+      "hallucination_reason": "3/3 synthesized findings strictly grounded in retrieved context with 3 unique citations (hallucination_rate=0.0).",
+      "answer_relevancy_score": 0.9135,
+      "answer_relevancy_passed": true,
+      "answer_relevancy_reason": "Synthesized report relevancy=0.9135 (query_cosine=0.840, cross_encoder=0.999)."
+    },
+    {
+      "id": "TC-004",
+      "question": "What Resilience4j circuit breaker thresholds, tenant rate-limiting status code, and Kafka dead-letter queue mechanism harden NexusEnterprise Hub?",
+      "evidence_items": 3,
+      "critic_valid": true,
+      "critic_hallucination_score": 0.0,
+      "hallucination_score": 0.0,
+      "hallucination_passed": true,
+      "hallucination_reason": "3/3 synthesized findings strictly grounded in retrieved context with 3 unique citations (hallucination_rate=0.0).",
+      "answer_relevancy_score": 0.8341,
+      "answer_relevancy_passed": true,
+      "answer_relevancy_reason": "Synthesized report relevancy=0.8341 (query_cosine=0.765, cross_encoder=0.837)."
+    },
+    {
+      "id": "TC-005",
+      "question": "Which LangGraph nodes, MCP tools, and NGINX proxy directives power real-time multi-agent streaming?",
+      "evidence_items": 3,
+      "critic_valid": true,
+      "critic_hallucination_score": 0.0,
+      "hallucination_score": 0.0,
+      "hallucination_passed": true,
+      "hallucination_reason": "3/3 synthesized findings strictly grounded in retrieved context with 3 unique citations (hallucination_rate=0.0).",
+      "answer_relevancy_score": 0.8652,
+      "answer_relevancy_passed": true,
+      "answer_relevancy_reason": "Synthesized report relevancy=0.8652 (query_cosine=0.789, cross_encoder=0.993)."
+    }
+  ]
+}

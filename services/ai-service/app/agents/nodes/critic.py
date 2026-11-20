@@ -23,6 +23,19 @@ async def critic_node(state: AgentWorkflowState) -> Dict[str, Any]:
         f"iteration={current_iteration}"
     )
 
+    # 1. Short-circuit cleanly when prompt was blocked by security guardrails
+    if state.get("status") == "SECURITY_BLOCKED" or state.get("metadata", {}).get("security_blocked"):
+        return {
+            "critique": {
+                "is_valid": True,
+                "feedback": "Security guardrail properly blocked adversarial prompt without data exposure.",
+                "hallucination_score": 0.0,
+            },
+            "iteration_count": current_iteration + 1,
+            "current_node": "critic",
+            "status": "SECURITY_BLOCKED",
+        }
+
     # 1. Audit Footnote & Citation Density
     footnote_matches = re.findall(r"\[\^\d+\]", draft_report)
     citation_count = len(set(footnote_matches))

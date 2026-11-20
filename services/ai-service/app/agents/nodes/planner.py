@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, List
 from app.agents.state import AgentWorkflowState
+from app.security.guardrails import inspect_prompt
 
 logger = logging.getLogger("nexus.agents.planner")
 
@@ -15,6 +16,21 @@ async def planner_node(state: AgentWorkflowState) -> Dict[str, Any]:
     tenant_id = state.get("tenant_id", "")
     critique = state.get("critique", {})
     iteration = state.get("iteration_count", 0)
+
+    guardrail = inspect_prompt(user_prompt)
+    if guardrail.is_blocked:
+        updated_meta = dict(state.get("metadata", {}))
+        updated_meta.update({
+            "security_blocked": True,
+            "security_category": guardrail.category,
+            "safe_refusal": guardrail.safe_refusal,
+        })
+        return {
+            "plan": ["SECURITY_GUARDRAIL_BLOCKED"],
+            "metadata": updated_meta,
+            "current_node": "planner",
+            "status": "SECURITY_BLOCKED",
+        }
 
     logger.info(
         f"[Planner] Planning sub-tasks for task_id='{task_id}', tenant='{tenant_id}', "

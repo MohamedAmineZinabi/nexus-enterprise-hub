@@ -15,6 +15,19 @@ async def synthesizer_node(state: AgentWorkflowState) -> Dict[str, Any]:
     task_id = state.get("task_id", "")
     tenant_id = state.get("tenant_id", "")
     research_data = state.get("research_data", [])
+    metadata = state.get("metadata", {})
+
+    if state.get("status") == "SECURITY_BLOCKED" or metadata.get("security_blocked"):
+        refusal = metadata.get(
+            "safe_refusal",
+            "# Security Policy Enforcement\n\nRequest declined due to security policy violation.",
+        )
+        logger.warning(f"[Synthesizer] Returning security refusal for task_id='{task_id}'.")
+        return {
+            "draft_report": refusal,
+            "current_node": "synthesizer",
+            "status": "SECURITY_BLOCKED",
+        }
 
     logger.info(
         f"[Synthesizer] Synthesizing report for task_id='{task_id}', tenant='{tenant_id}', "

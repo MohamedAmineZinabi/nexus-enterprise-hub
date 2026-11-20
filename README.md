@@ -147,6 +147,37 @@ curl -X POST http://localhost:4200/api/v1/auth/register \
 
 ---
 
+## AI Quality Assurance, Evaluation & Red-Teaming (RAGAS, DeepEval, Giskard)
+
+NexusEnterprise Hub embeds an automated AI quality-gate and adversarial red-teaming suite under `services/ai-service/tests/evals/`, backed by a curated 5-case multi-tenant benchmark (`golden_dataset.json`) and an isolated in-memory Qdrant vector harness (`QdrantClient(":memory:")`).
+
+### Dual-Mode Execution (Online LLM Judge + Offline CPU CI)
+- **Offline / CI Mode (default when `OPENAI_API_KEY` is unset)**: Runs 100% locally on CPU with zero API cost and zero external infrastructure dependencies by combining deterministic grounding checks with our local HuggingFace neural stack (`BAAI/bge-small-en-v1.5` embeddings + `cross-encoder/ms-marco-MiniLM-L-6-v2` reranker).
+- **Online LLM-as-a-Judge Mode (`OPENAI_API_KEY` set)**: Automatically upgrades RAGAS and DeepEval suites to invoke an external LLM judge (configurable via `EVAL_JUDGE_MODEL`, default `gpt-4o-mini`) and supports full `giskard.scan()` when `RUN_GISKARD_LLM_SCAN=1`.
+
+### Metrics, Probes & Enforced Quality Thresholds
+
+| Framework | Test Suite | Metrics / Security Probes | Quality Gate | Exported Artifact |
+| :--- | :--- | :--- | :--- | :--- |
+| **RAGAS** | `tests/evals/test_rag_ragas_eval.py` | `ContextPrecision`, `ContextRecall`, `Faithfulness`, `AnswerRelevancy`, Top-1 Citation Match | Precision >= `0.75`, Recall >= `0.80`, Faithfulness >= `0.80`, Relevancy >= `0.75` | `tests/evals/reports/ragas_report.json` |
+| **DeepEval** | `tests/evals/test_agent_deepeval.py` | `LLMTestCase`, `HallucinationMetric`, `AnswerRelevancyMetric` (custom `BaseMetric` offline), LangGraph Critic audit | Hallucination <= `0.20`, Answer Relevancy >= `0.75`, Critic `is_valid=True` | `tests/evals/reports/deepeval_report.json` |
+| **Giskard** | `tests/evals/test_security_giskard.py` | `giskard.Model` + `giskard.Dataset`: Prompt Injection / Jailbreak Resistance, Multi-Tenant Leakage (Tenant A vs Tenant B), Typo Perturbation Robustness | Block Rate = `100%`, Cross-Tenant Leaks = `0`, Typo Citation & Semantic Stability >= `0.80` | `tests/evals/reports/giskard_security_report.json` |
+
+### Evaluation Workflow
+
+1. **Prompt Guardrails (`app/security/guardrails.py`)**: Intercepts prompt-injection, jailbreak (`DAN`/developer mode), and cross-tenant data exfiltration payloads inside the LangGraph `Planner` node before Qdrant or MCP tools are invoked.
+2. **Local Execution**:
+   ```bash
+   # Run offline on CPU via Docker (exports JSON reports into services/ai-service/tests/evals/reports/)
+   make ai-eval
+
+   # Or run with an OpenAI LLM judge
+   OPENAI_API_KEY=sk-... make ai-eval
+   ```
+3. **CI Enforcement**: `.github/workflows/ci-ai-service.yml` runs `pytest tests/evals/ -v` on every push/PR touching `services/ai-service/**` or `proto/**` and uploads the generated JSON reports as GitHub Actions build artifacts (`ai-eval-reports`).
+
+---
+
 ## Development & Verification Commands
 
 ```bash
@@ -154,5 +185,6 @@ make up             # Build and start full 8-service production stack
 make status         # Show running containers and health status
 make logs           # Tail combined container logs
 make down           # Stop stack (preserves persistent volumes)
-make test-all       # Run Core Service Maven tests, AI Service pytest, & Frontend build
+make ai-eval        # Run RAGAS, DeepEval & Giskard evaluation/red-teaming suite
+make test-all       # Run Core Service Maven tests, AI Service pytest/evals, & Frontend build
 ```
