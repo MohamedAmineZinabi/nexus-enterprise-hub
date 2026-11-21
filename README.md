@@ -2,6 +2,13 @@
 
 **Production Multi-Tenant Enterprise AI Platform** combining **Angular 18+** (Signals + TailwindCSS), **Spring Boot 3.3** (JWT Multi-Tenancy + Resilience4j + SSE), and **Python FastAPI / LangGraph** (Hybrid RAG + Cross-Encoder Reranking + MCP + Distributed Redis Coordination) over **gRPC/Protobuf** and **Apache Kafka (KRaft)**.
 
+## Documentation
+
+| Guide | For | What's inside |
+|---|---|---|
+| [**Technical Architecture Guide**](docs/TECHNICAL_ARCHITECTURE_GUIDE.md) | Engineers, architects, reviewers | Full topology, file-by-file repository map, technology rationale, sequence diagrams for every data flow, security & resilience matrix, REST/gRPC/Kafka/Redis/PostgreSQL reference. |
+| [**User Guide**](docs/USER_GUIDE.md) | First-time users | Step-by-step walkthrough with live screenshots: sign-in, workspace registration, knowledge base, hybrid search, Agent Studio, enabling an LLM, troubleshooting. |
+
 ---
 
 ## System Architecture
