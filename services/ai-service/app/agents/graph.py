@@ -16,29 +16,31 @@ logger = logging.getLogger("nexus.agents.graph")
 
 def _should_continue_critic(state: AgentWorkflowState) -> str:
     """
-    Evaluates critic output to determine whether to loop back for deeper research
-    or conclude the workflow.
+    Routes a rejected draft back to the planner (which re-plans using the critic's feedback) until
+    ``settings.max_agent_iterations`` critic passes have run; otherwise ends the workflow.
     """
-    critique = state.get("critique", {})
+    critique = state.get("critique", {}) or {}
     is_valid = critique.get("is_valid", False)
-    iteration = state.get("iteration_count", 0)
-    max_retries = settings.max_agent_iterations
+    iteration = int(state.get("iteration_count", 0) or 0)
+    max_iterations = max(1, int(settings.max_agent_iterations))
 
-    if not is_valid and iteration < max_retries:
+    if not is_valid and iteration < max_iterations:
         logger.info(
-            f"[Workflow Graph] Critique validation failed (iteration {iteration}/{max_retries}). "
-            f"Looping back to 'researcher' node."
+            f"[Workflow Graph] Draft rejected (iteration {iteration}/{max_iterations}). Re-planning."
         )
-        return "researcher"
+        return "planner"
 
-    logger.info(f"[Workflow Graph] Critique validation satisfied or max retries reached. Transitioning to END.")
+    if not is_valid:
+        logger.warning(
+            f"[Workflow Graph] Draft still rejected after {iteration} iteration(s); ending with the best available report."
+        )
     return END
 
 
 def create_agent_graph(checkpointer: Optional[Any] = None):
     """
     Constructs and compiles the enterprise multi-agent LangGraph state machine.
-    Nodes: Planner -> Researcher -> Synthesizer -> Critic (with conditional feedback loop).
+    Nodes: Planner -> Researcher -> Synthesizer -> Critic (-> Planner when the critic rejects the draft).
     """
     workflow = StateGraph(AgentWorkflowState)
 
@@ -59,7 +61,7 @@ def create_agent_graph(checkpointer: Optional[Any] = None):
         "critic",
         _should_continue_critic,
         {
-            "researcher": "researcher",
+            "planner": "planner",
             END: END
         }
     )

@@ -1,6 +1,7 @@
 package com.nexus.hub.kafka.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nexus.hub.config.RedisConfig;
 import com.nexus.hub.kafka.event.TaskCompletedEventDto;
 import com.nexus.hub.kafka.event.TaskProgressEventDto;
 import com.nexus.hub.modules.task.entity.AgentTask;
@@ -8,10 +9,12 @@ import com.nexus.hub.modules.task.entity.TaskAuditEvent;
 import com.nexus.hub.modules.task.entity.TaskStatus;
 import com.nexus.hub.modules.task.repository.AgentTaskRepository;
 import com.nexus.hub.modules.task.repository.TaskAuditEventRepository;
+import com.nexus.hub.modules.task.service.TaskService;
 import com.nexus.hub.modules.task.service.TaskStreamHub;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Payload;
@@ -58,7 +61,8 @@ public class AgentTaskTelemetryConsumer {
         log.info("[Telemetry Consumer] Progress event for task='{}', node='{}', status='{}'",
                 taskId, event.getNodeName(), event.getStatus());
 
-        if (!taskRepository.existsById(taskId)) {
+        AgentTask task = taskRepository.findById(taskId).orElse(null);
+        if (task == null) {
             log.warn("Task not found in database for progress telemetry: {}", taskId);
             return;
         }
@@ -66,12 +70,8 @@ public class AgentTaskTelemetryConsumer {
         // 1. Atomically update task progress state in PostgreSQL if not already in terminal status
         taskRepository.updateProgressState(taskId, event.getNodeName());
 
-        // Invalidate task cache to ensure fresh state
-        try {
-            if (cacheManager != null && cacheManager.getCache("tasks_cache") != null) {
-                cacheManager.getCache("tasks_cache").evict(taskId);
-            }
-        } catch (Exception ignored) {}
+        // Invalidate task cache to ensure fresh state (tenant id from the persisted entity)
+        evictTaskCache(task);
 
         // 2. Persist audit telemetry event
         String payloadJson = null;
@@ -84,9 +84,10 @@ public class AgentTaskTelemetryConsumer {
         }
 
         TaskAuditEvent auditEvent = TaskAuditEvent.builder()
-                .task(taskRepository.getReferenceById(taskId))
+                .task(task)
                 .eventType("TASK_PROGRESS")
                 .nodeType(event.getNodeName())
+                // Real elapsed duration (ms since processing started), never an epoch timestamp
                 .durationMs(event.getDurationMs())
                 .message(event.getMessage() != null
                         ? event.getMessage()
@@ -154,12 +155,8 @@ public class AgentTaskTelemetryConsumer {
 
         taskRepository.save(task);
 
-        // Invalidate task cache
-        try {
-            if (cacheManager != null && cacheManager.getCache("tasks_cache") != null) {
-                cacheManager.getCache("tasks_cache").evict(taskId);
-            }
-        } catch (Exception ignored) {}
+        // Invalidate task cache (tenant id from the persisted entity)
+        evictTaskCache(task);
 
         // 2. Persist audit telemetry event
         TaskAuditEvent auditEvent = TaskAuditEvent.builder()
@@ -177,6 +174,20 @@ public class AgentTaskTelemetryConsumer {
         // 3. Broadcast to live SSE streams and complete emitter sessions
         taskStreamHub.broadcastEvent(taskId, "TASK_COMPLETED", event);
         taskStreamHub.completeStream(taskId);
+    }
+
+    private void evictTaskCache(AgentTask task) {
+        try {
+            if (cacheManager == null || task.getTenant() == null) {
+                return;
+            }
+            Cache cache = cacheManager.getCache(RedisConfig.TASKS_CACHE);
+            if (cache != null) {
+                cache.evict(TaskService.cacheKey(task.getTenant().getId(), task.getId()));
+            }
+        } catch (Exception e) {
+            log.warn("Failed to evict tasks_cache entry for task {}: {}", task.getId(), e.getMessage());
+        }
     }
 
     private TaskProgressEventDto parseProgressEvent(Object raw) {

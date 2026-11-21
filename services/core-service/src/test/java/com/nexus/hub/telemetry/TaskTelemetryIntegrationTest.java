@@ -21,6 +21,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -48,6 +49,9 @@ class TaskTelemetryIntegrationTest {
 
     @Mock
     private CacheManager cacheManager;
+
+    @Mock
+    private Cache tasksCache;
 
     private ObjectMapper objectMapper;
     private AgentTaskTelemetryConsumer telemetryConsumer;
@@ -120,8 +124,8 @@ class TaskTelemetryIntegrationTest {
     @Test
     @DisplayName("TelemetryConsumer: Process progress event updates task state and records audit log")
     void testProcessProgressEvent() {
-        when(taskRepository.existsById(taskId)).thenReturn(true);
-        when(taskRepository.getReferenceById(taskId)).thenReturn(testTask);
+        when(taskRepository.findById(taskId)).thenReturn(Optional.of(testTask));
+        when(cacheManager.getCache("tasks_cache")).thenReturn(tasksCache);
 
         TaskProgressEventDto progressEvent = TaskProgressEventDto.builder()
                 .taskId(taskId)
@@ -151,6 +155,52 @@ class TaskTelemetryIntegrationTest {
 
         // 3. Verify SSE broadcast
         verify(taskStreamHub, times(1)).broadcastEvent(eq(taskId), eq("TASK_PROGRESS"), eq(progressEvent));
+
+        // 4. Cache eviction uses the tenant-scoped key derived from the task entity
+        verify(tasksCache).evict(tenantId + ":" + taskId);
+    }
+
+    @Test
+    @DisplayName("TelemetryConsumer: durationMs is the real elapsed duration, never the epoch timestampMs")
+    void testProgressDurationIsNotTimestamp() {
+        when(taskRepository.findById(taskId)).thenReturn(Optional.of(testTask));
+        long epochMs = 1_763_600_000_000L;
+        String json = "{\"taskId\":\"" + taskId + "\",\"tenantId\":\"" + tenantId + "\","
+                + "\"nodeName\":\"PLANNER\",\"status\":\"COMPLETED\",\"durationMs\":250,\"timestampMs\":" + epochMs + "}";
+
+        telemetryConsumer.onTaskProgress(json);
+
+        ArgumentCaptor<TaskAuditEvent> auditCaptor = ArgumentCaptor.forClass(TaskAuditEvent.class);
+        verify(auditEventRepository).save(auditCaptor.capture());
+        assertThat(auditCaptor.getValue().getDurationMs()).isEqualTo(250L);
+
+        TaskProgressEventDto parsed = objectMapper.convertValue(
+                Map.of("taskId", taskId.toString(), "timestampMs", epochMs), TaskProgressEventDto.class);
+        assertThat(parsed.getDurationMs()).isNull();
+        assertThat(parsed.getTimestampMs()).isEqualTo(epochMs);
+    }
+
+    @Test
+    @DisplayName("TelemetryConsumer: totalDurationMs comes from totalDurationMs, timestampMs is kept separate")
+    void testCompletedDurationIsNotTimestamp() throws Exception {
+        testTask.setStatus(TaskStatus.PROCESSING);
+        when(taskRepository.findById(taskId)).thenReturn(Optional.of(testTask));
+        long epochMs = 1_763_600_000_000L;
+        String json = "{\"taskId\":\"" + taskId + "\",\"status\":\"COMPLETED\",\"report\":\"done\","
+                + "\"totalDurationMs\":3850,\"timestampMs\":" + epochMs + "}";
+
+        telemetryConsumer.onTaskCompleted(json);
+
+        ArgumentCaptor<TaskAuditEvent> auditCaptor = ArgumentCaptor.forClass(TaskAuditEvent.class);
+        verify(auditEventRepository).save(auditCaptor.capture());
+        assertThat(auditCaptor.getValue().getDurationMs()).isEqualTo(3850L);
+        Map<?, ?> payload = objectMapper.readValue(testTask.getResultPayload(), Map.class);
+        assertThat(((Number) payload.get("totalDurationMs")).longValue()).isEqualTo(3850L);
+
+        TaskCompletedEventDto onlyTimestamp = objectMapper.readValue(
+                "{\"taskId\":\"" + taskId + "\",\"timestampMs\":" + epochMs + "}", TaskCompletedEventDto.class);
+        assertThat(onlyTimestamp.getTotalDurationMs()).isNull();
+        assertThat(onlyTimestamp.getTimestampMs()).isEqualTo(epochMs);
     }
 
     @Test

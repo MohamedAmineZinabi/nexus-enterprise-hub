@@ -14,10 +14,18 @@ on:
       - 'proto/**'
       - '.github/workflows/ci-core-service.yml'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-core-service-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Compile Protobuf & Run Maven Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -33,3 +41,16 @@ jobs:
       - name: Compile Protobuf contracts, Java sources, and run tests
         working-directory: services/core-service
         run: mvn -B clean test
+
+  docker-build:
+    name: Validate production Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: build-and-test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build services/core-service/Dockerfile (context = repo root)
+        run: docker build -f services/core-service/Dockerfile -t nexus-core-service:ci .

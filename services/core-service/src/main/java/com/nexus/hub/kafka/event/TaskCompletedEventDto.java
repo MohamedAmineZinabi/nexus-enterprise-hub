@@ -30,8 +30,12 @@ public class TaskCompletedEventDto {
 
     private List<Object> citations;
 
-    @JsonAlias({"totalDurationMs", "durationMs", "timestampMs"})
+    /** Total elapsed milliseconds of the workflow (a duration, not a timestamp). */
+    @JsonAlias({"totalDurationMs", "durationMs"})
     private Long totalDurationMs;
+
+    /** Epoch-millis emission time of the event; kept separate from totalDurationMs. */
+    private Long timestampMs;
 
     @JsonAlias({"errorDetails", "error", "message"})
     private String errorDetails;

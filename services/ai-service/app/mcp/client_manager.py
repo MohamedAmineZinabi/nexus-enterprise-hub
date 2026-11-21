@@ -46,7 +46,11 @@ class ServerConnection:
             url = self.config.get("url")
             if not url:
                 raise ValueError(f"SSE transport requires 'url' in server config: {self.name}")
-            headers = self.config.get("headers", {})
+            headers = dict(self.config.get("headers", {}) or {})
+            if self.config.get("internal", False):
+                # Loopback connection to this service's own MCP SSE endpoint (protected by the internal key)
+                from app.security.auth import INTERNAL_API_KEY_HEADER
+                headers[INTERNAL_API_KEY_HEADER] = settings.internal_api_key
             async with sse_client(url, headers=headers) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await asyncio.wait_for(session.initialize(), timeout=timeout)

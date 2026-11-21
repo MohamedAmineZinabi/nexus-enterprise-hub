@@ -84,29 +84,37 @@ flowchart TB
 ### 1. One-Command Production Launch
 
 ```bash
-# Optional: customize secrets in .env (auto-generated from .env.example if omitted)
+# 1. Create .env and replace EVERY "change-me" value (compose refuses to start with missing secrets):
+#    POSTGRES_PASSWORD, REDIS_PASSWORD, QDRANT_API_KEY, JWT_SECRET (>= 32 chars), INTERNAL_API_KEY (>= 16 chars)
+#    Optional: LLM_API_KEY / LLM_BASE_URL / LLM_MODEL for any OpenAI-compatible LLM (empty = deterministic mode)
 cp .env.example .env
 
-# Build all multi-stage images and launch the 8-service stack
+# 2. Local development (backend/infra ports bound to 127.0.0.1 via docker-compose.override.yml)
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.override.yml up -d --build
+
+# Production-shaped run: only the NGINX gateway (4200) is published
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
-Or using `make`:
+Or using `make` (uses the development override):
 ```bash
 make up
 ```
 
 ### 2. Service & Ports Map
 
+Only the frontend gateway is published by `deploy/docker-compose.yml`. The other host ports below exist
+only with `deploy/docker-compose.override.yml` and are bound to `127.0.0.1`.
+
 | Service | Container Name | Host Port(s) | Purpose / Health Endpoint |
 | :--- | :--- | :--- | :--- |
 | **Frontend + NGINX** | `nexus-frontend` | `4200` | Angular UI & API/SSE Gateway (`http://localhost:4200/nginx-health`) |
-| **Core Service** | `nexus-core-service` | `8080` | REST API, JWT Auth, SSE Hub, Actuator (`http://localhost:8080/actuator/health`) |
-| **AI Service** | `nexus-ai-service` | `8000`, `50051` | FastAPI REST (`http://localhost:8000/healthz`) & gRPC Server |
-| **PostgreSQL 16** | `nexus-postgres` | `5432` | Relational persistence (`nexus_db`, schema `core`) |
-| **Redis 7** | `nexus-redis` | `6379` | Distributed locking, rate limiting, checkpoints, caching |
-| **Qdrant** | `nexus-qdrant` | `6333`, `6334` | Vector DB dashboard (`http://localhost:6333/dashboard`) & gRPC |
-| **Apache Kafka** | `nexus-kafka` | `9092` | KRaft event broker (`agent.task.requested`, `.events`, `.completed`, `.dlq`) |
+| **Core Service** | `nexus-core-service` | `127.0.0.1:8080` (dev) | REST API, JWT Auth, SSE Hub (`/actuator/health` public; other actuator endpoints require ADMIN) |
+| **AI Service** | `nexus-ai-service` | `127.0.0.1:8000`, `127.0.0.1:50051` (dev) | Internal only: every call except `/healthz` & `/readyz` requires `X-Internal-Api-Key` (HTTP) / `x-internal-api-key` (gRPC metadata) |
+| **PostgreSQL 16** | `nexus-postgres` | `127.0.0.1:5432` (dev) | Relational persistence (`nexus_db`, schema `core`) |
+| **Redis 7** | `nexus-redis` | `127.0.0.1:6379` (dev) | Token revocation, distributed locking, rate limiting (`noeviction`) |
+| **Qdrant** | `nexus-qdrant` | `127.0.0.1:6333`, `127.0.0.1:6334` (dev) | Vector DB (requires `api-key` header = `QDRANT_API_KEY`) |
+| **Apache Kafka** | `nexus-kafka` | `127.0.0.1:9092` (dev) | KRaft event broker (`agent.task.requested`, `.events`, `.completed`, `.dlq`) |
 | **Kafka Init** | `nexus-kafka-init` | — | Idempotent startup topic provisioner |
 
 ### 3. Authentication & Demo Workspace Access

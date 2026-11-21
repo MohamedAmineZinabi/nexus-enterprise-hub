@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import uuid
 import asyncio
 import logging
@@ -10,9 +11,10 @@ from aiokafka import AIOKafkaConsumer
 from aiokafka.structs import TopicPartition, OffsetAndMetadata
 from app.core.config import settings
 from app.agents.graph import get_agent_graph
-from app.agents.state import AgentWorkflowState
+from app.agents.state import build_initial_state
 from app.kafka.producer import get_event_publisher
 from app.db.redis import distributed_task_lock, save_task_state
+from app.security.auth import require_tenant_id
 
 logger = logging.getLogger("nexus.kafka.consumer")
 
@@ -160,8 +162,12 @@ class KafkaTaskConsumer:
     ):
         """Processes a single task request, routing poison-pills and graph failures to DLQ."""
         task_id = "unknown"
-        tenant_id = "default"
+        tenant_id = ""
         trace_id = "trace-unknown"
+        started = time.monotonic()
+
+        def _elapsed_ms() -> int:
+            return int((time.monotonic() - started) * 1000)
 
         try:
             data = json.loads(raw_str)
@@ -169,7 +175,7 @@ class KafkaTaskConsumer:
                 raise ValueError(f"Malformed message payload: expected JSON object, got {type(data).__name__}")
 
             task_id = str(data.get("taskId") or data.get("task_id") or "").strip()
-            tenant_id = str(data.get("tenantId") or data.get("tenant_id") or "default").strip()
+            tenant_id = str(data.get("tenantId") or data.get("tenant_id") or "").strip()
             prompt = data.get("prompt") or data.get("user_prompt") or ""
             trace_id = str(data.get("traceId") or data.get("trace_id") or f"trace-{task_id or 'unknown'}")
             doc_ids = data.get("documentIds") or data.get("document_ids") or []
@@ -182,16 +188,25 @@ class KafkaTaskConsumer:
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError(f"Invalid task request '{task_id}': missing or blank 'prompt'")
 
-            logger.info(f"[Kafka Consumer] Received task: id='{task_id}', tenant='{tenant_id}', prompt='{prompt}'")
+            # Poison-pill: a task without a valid tenant must never run (no 'default' tenant fallback)
+            tenant_id = require_tenant_id(tenant_id)
+
+            logger.info(f"[Kafka Consumer] Received task: id='{task_id}', tenant='{tenant_id}', prompt_chars={len(prompt)}")
 
             # Acquire distributed lock before executing task to ensure idempotency
             async with distributed_task_lock(task_id, timeout_seconds=120) as lock:
+                if isinstance(getattr(lock, "error", None), Exception):
+                    # Lock store outage is not contention: fail the task visibly instead of dropping it
+                    raise RuntimeError(f"Distributed lock store unavailable: {lock.error}")
                 if not lock.acquired:
                     logger.warning(
                         f"[Kafka Consumer] Task '{task_id}' is already locked or running on another worker. "
                         f"Skipping duplicate execution to enforce strict idempotency."
                     )
                     return
+
+                # Measure processing time from lock acquisition (excludes time spent waiting in the topic)
+                started = time.monotonic()
 
                 # Persist active task state in Redis with 24h TTL
                 await save_task_state(task_id, {
@@ -208,26 +223,20 @@ class KafkaTaskConsumer:
                     tenant_id=tenant_id,
                     node_type="WORKFLOW",
                     phase="STARTED",
-                    message=f"Received task: '{prompt}'",
-                    trace_id=trace_id
+                    message="Task accepted by multi-agent workflow.",
+                    trace_id=trace_id,
+                    duration_ms=_elapsed_ms()
                 )
 
                 # 2. Build initial state and run graph
-                initial_state: AgentWorkflowState = {
-                    "task_id": task_id,
-                    "tenant_id": tenant_id,
-                    "user_prompt": prompt,
-                    "trace_id": trace_id,
-                    "document_ids": [str(d) for d in doc_ids],
-                    "metadata": meta,
-                    "plan": [],
-                    "research_data": [],
-                    "draft_report": "",
-                    "critique": {},
-                    "iteration_count": 0,
-                    "current_node": "START",
-                    "status": "PROCESSING"
-                }
+                initial_state = build_initial_state(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    user_prompt=prompt,
+                    trace_id=trace_id,
+                    document_ids=doc_ids,
+                    metadata=meta if isinstance(meta, dict) else {},
+                )
 
                 config = {"configurable": {"thread_id": task_id}}
                 final_report = ""
@@ -262,9 +271,11 @@ class KafkaTaskConsumer:
                             payload={
                                 "current_node": node_name,
                                 "status": node_status,
-                                "iteration": node_state.get("iteration_count", 0)
+                                "iteration": node_state.get("iteration_count", 0),
+                                "errors": node_state.get("errors", [])[-3:],
                             },
-                            trace_id=trace_id
+                            trace_id=trace_id,
+                            duration_ms=_elapsed_ms()
                         )
 
                 # 4. Publish final completion event
@@ -274,7 +285,8 @@ class KafkaTaskConsumer:
                     draft_report=final_report,
                     execution_status="COMPLETED",
                     citations=citations,
-                    trace_id=trace_id
+                    trace_id=trace_id,
+                    total_duration_ms=_elapsed_ms()
                 )
 
                 # Persist completed task metadata in Redis with 24h TTL
@@ -346,7 +358,8 @@ class KafkaTaskConsumer:
                         execution_status="FAILED",
                         citations=[],
                         trace_id=trace_id,
-                        error_details=f"[{error_type}] {exc}"
+                        error_details=f"[{error_type}] {exc}",
+                        total_duration_ms=_elapsed_ms()
                     )
                 except Exception as notify_err:
                     logger.error(

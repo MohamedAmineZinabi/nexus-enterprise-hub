@@ -19,23 +19,25 @@ RUN mvn dependency:go-offline -B || true
 COPY services/core-service/src ./src
 RUN mvn clean package -DskipTests
 
-# --- Stage 2: Minimal Production Runtime ---
+# --- Stage 2: Minimal Production Runtime (Alpine) ---
 FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 
-RUN addgroup -S nexus && adduser -S nexus -G nexus
+# Fixed UID/GID 1000 shared with ai-service so both containers can read/write the /shared-uploads volume
+RUN addgroup -S -g 1000 nexus && adduser -S -u 1000 -G nexus nexus
 
 # Copy built JAR from builder
 COPY --from=builder /workspace/services/core-service/target/core-service-*.jar /app/app.jar
 
-# Prepare shared uploads mount point and enforce non-root ownership
-RUN mkdir -p /shared-uploads && chown -R nexus:nexus /app /shared-uploads && chmod 777 /shared-uploads
-USER nexus
+# Prepare shared uploads mount point owned by the non-root runtime user (no world-writable dirs)
+RUN mkdir -p /shared-uploads && chown -R 1000:1000 /app /shared-uploads
+USER 1000:1000
 
-EXPOSE 8080
+# 8080 = API, 8081 = actuator (management.server.port; not exposed through NGINX)
+EXPOSE 8080 8081
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=45s \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/actuator/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8081/actuator/health || exit 1
 
 ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/app.jar"]

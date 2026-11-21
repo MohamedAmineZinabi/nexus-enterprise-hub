@@ -6,14 +6,20 @@ spring:
   application:
     name: core-service
 
-  profiles:
-    active: dev
+  # NOTE: no hardcoded active profile; select one via SPRING_PROFILES_ACTIVE.
+
+  # Multipart upload limits (default 1MB is too small for enterprise documents)
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 55MB
 
   # Relational Database Persistence (PostgreSQL 16)
+  # Secrets have NO defaults: startup fails fast if they are not provided via environment.
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:nexus_db}?currentSchema=core
     username: ${POSTGRES_USER:nexus_admin}
-    password: ${POSTGRES_PASSWORD:nexus_super_secret_password_2026}
+    password: ${POSTGRES_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 15
@@ -44,7 +50,7 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:nexus_redis_secret_token_2026}
+      password: ${REDIS_PASSWORD}
       timeout: 3000ms
 
   # Kafka Event Streaming
@@ -63,13 +69,22 @@ spring:
 
 # Management & Observability (Actuator + Resilience4j Health & Circuit Breakers)
 management:
+  # Actuator is served ONLY on this separate port (never on server.port 8080, which NGINX exposes).
+  # The main SecurityFilterChain is applied to the management child context as well.
+  server:
+    port: ${MANAGEMENT_PORT:8081}
   endpoints:
     web:
       exposure:
         include: health,info,circuitbreakers,circuitbreakerevents,retries,retryevents,metrics
   endpoint:
     health:
-      show-details: always
+      # /actuator/health is public (docker healthcheck) but only exposes status;
+      # component details are shown to authenticated PLATFORM_OPERATOR users only
+      # (tenant ADMINs are org owners, not infrastructure operators).
+      show-details: when-authorized
+      show-components: when-authorized
+      roles: PLATFORM_OPERATOR
   health:
     circuitbreakers:
       enabled: true
@@ -116,13 +131,23 @@ resilience4j:
 nexus:
   security:
     jwt:
-      # 256-bit Hex Key for HMAC-SHA256
-      secret: ${JWT_SECRET:4e65787573456e746572707269736548756253757065725365637265744b6579323032362140232425}
+      # HMAC-SHA256 signing key (>= 32 bytes). REQUIRED, no default.
+      secret: ${JWT_SECRET}
       expiration-ms: 86400000 # 24 Hours
   rate-limit:
     enabled: ${RATE_LIMIT_ENABLED:true}
     requests-per-minute: ${RATE_LIMIT_RPM:30}
     window-seconds: ${RATE_LIMIT_WINDOW_SECONDS:60}
+    # Per-client-IP throttle for unauthenticated POST /api/v1/auth/login and /register
+    auth-requests-per-minute: ${RATE_LIMIT_AUTH_RPM:10}
+    auth-window-seconds: ${RATE_LIMIT_AUTH_WINDOW_SECONDS:60}
+  ai-service:
+    # Shared secret sent as gRPC metadata 'x-internal-api-key' on every call to ai-service.
+    # REQUIRED, no default: startup fails if INTERNAL_API_KEY is unset or blank.
+    internal-api-key: ${INTERNAL_API_KEY}
+  rag:
+    # Comma-separated allowlist of Qdrant collections a tenant may ingest into / search.
+    allowed-collections: ${RAG_ALLOWED_COLLECTIONS:enterprise_docs}
   storage:
     shared-uploads-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
     upload-dir: ${SHARED_UPLOADS_DIR:/shared-uploads}
@@ -132,6 +157,15 @@ nexus:
       agent-task-events: ${KAFKA_TOPIC_AGENT_TASK_EVENTS:agent.task.events}
       agent-task-completed: ${KAFKA_TOPIC_AGENT_TASK_COMPLETED:agent.task.completed}
       agent-task-dlq: ${KAFKA_TOPIC_AGENT_TASK_DLQ:agent.task.dlq}
+      # Async document ingestion (core-service -> ai-service, and the outcome back), key = documentId
+      document-ingest-requested: ${KAFKA_TOPIC_DOCUMENT_INGEST_REQUESTED:document.ingest.requested}
+      document-ingest-completed: ${KAFKA_TOPIC_DOCUMENT_INGEST_COMPLETED:document.ingest.completed}
+    consumer-groups:
+      document-ingest: ${KAFKA_GROUP_DOCUMENT_INGEST:nexus-core-document-ingest}
+    producer:
+      # Max time to wait (after DB commit) for the broker ack of agent.task.requested
+      # and document.ingest.requested
+      send-timeout-ms: ${KAFKA_TASK_SEND_TIMEOUT_MS:15000}
     dlq:
       backoff-initial-interval-ms: ${KAFKA_DLQ_BACKOFF_INITIAL_MS:1000}
       backoff-multiplier: ${KAFKA_DLQ_BACKOFF_MULTIPLIER:2.0}

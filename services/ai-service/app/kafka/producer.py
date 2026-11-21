@@ -52,9 +52,13 @@ class AgentEventPublisher:
         phase: str,
         message: str,
         payload: Optional[Dict[str, Any]] = None,
-        trace_id: str = ""
+        trace_id: str = "",
+        duration_ms: Optional[int] = None
     ):
-        """Publishes an intermediate node transition event to `agent.task.events`."""
+        """
+        Publishes an intermediate node transition event to `agent.task.events`.
+        ``durationMs`` = elapsed milliseconds since the task started processing.
+        """
         if not self._started or not self.producer:
             await self.start()
 
@@ -69,6 +73,8 @@ class AgentEventPublisher:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "timestampMs": int(time.time() * 1000)
         }
+        if duration_ms is not None:
+            event["durationMs"] = max(0, int(duration_ms))
 
         topic = settings.kafka_topic_task_events
         key = tenant_id or task_id
@@ -83,9 +89,13 @@ class AgentEventPublisher:
         execution_status: str = "COMPLETED",
         citations: Optional[List[Any]] = None,
         trace_id: str = "",
-        error_details: Optional[str] = None
+        error_details: Optional[str] = None,
+        total_duration_ms: Optional[int] = None
     ):
-        """Publishes the finalized or failed execution outcome to `agent.task.completed`."""
+        """
+        Publishes the finalized or failed execution outcome to `agent.task.completed`.
+        ``totalDurationMs`` = total elapsed milliseconds of task processing.
+        """
         if not self._started or not self.producer:
             await self.start()
 
@@ -101,6 +111,8 @@ class AgentEventPublisher:
         }
         if error_details is not None:
             event["errorDetails"] = error_details
+        if total_duration_ms is not None:
+            event["totalDurationMs"] = max(0, int(total_duration_ms))
 
         topic = settings.kafka_topic_task_completed
         key = task_id
@@ -109,6 +121,39 @@ class AgentEventPublisher:
             f"[Kafka Producer] Published completion event for task='{task_id}' "
             f"(status='{execution_status}') to topic '{topic}'"
         )
+
+    async def publish_ingest_completed(
+        self,
+        document_id: str,
+        tenant_id: str,
+        status: str,
+        chunks_created: int = 0,
+        vector_collection: str = "",
+        trace_id: str = "",
+        error_details: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+    ):
+        """Publishes the outcome of an asynchronous document ingestion to `document.ingest.completed`."""
+        if not self._started or not self.producer:
+            await self.start()
+
+        event: Dict[str, Any] = {
+            "documentId": document_id,
+            "tenantId": tenant_id,
+            "traceId": trace_id,
+            "status": status,
+            "chunksCreated": max(0, int(chunks_created)),
+            "vectorCollection": vector_collection,
+            "timestampMs": int(time.time() * 1000),
+        }
+        if error_details is not None:
+            event["errorDetails"] = error_details[:2000]
+        if duration_ms is not None:
+            event["durationMs"] = max(0, int(duration_ms))
+
+        topic = settings.kafka_topic_document_ingest_completed
+        await self.producer.send_and_wait(topic, value=event, key=document_id)
+        logger.info(f"[Kafka Producer] Ingestion outcome for document='{document_id}': {status} ({chunks_created} chunks)")
 
     async def publish_dlq(
         self,

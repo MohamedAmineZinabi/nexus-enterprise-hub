@@ -47,20 +47,56 @@ def mock_mcp_manager():
     return mgr
 
 
+TEST_TENANT = "d5569b60-2545-4c7b-be8a-4aa7b787de67"
+
+
+class _AbortError(Exception):
+    pass
+
+
+class FakeServicerContext:
+    """Minimal grpc.aio.ServicerContext double that records abort() calls."""
+
+    def __init__(self):
+        self.code = None
+        self.details = None
+
+    async def abort(self, code, details):
+        self.code, self.details = code, details
+        raise _AbortError(details)
+
+
+def _tenant_ctx(tenant_id: str = TEST_TENANT):
+    from app.grpc.generated.ai import common_pb2
+    return common_pb2.TenantContext(tenant_id=tenant_id, user_id="u-1", trace_id="trace-test")
+
+
+class _StubRetriever:
+    def search(self, **kwargs):
+        return []
+
+
 @pytest.mark.asyncio
-async def test_native_mcp_server_tools():
-    """Verifies that Nexus Hub's native MCP server tools are registered and executable."""
+async def test_native_mcp_server_tools(monkeypatch):
+    """Native MCP tools are registered, execute for a tenant, and refuse calls without a tenant."""
+    import app.mcp.server as mcp_server_module
+    monkeypatch.setattr(mcp_server_module, "get_hybrid_retriever", lambda: _StubRetriever())
+
     tools = await nexus_mcp_server.list_tools()
     tool_names = [t.name for t in tools]
     assert "nexus_hybrid_search" in tool_names
     assert "nexus_document_summarizer" in tool_names
 
-    # Test executing native search tool
-    result = await nexus_mcp_server.call_tool("nexus_hybrid_search", {"query": "security policy", "top_k": 2})
-    assert result is not None
-    assert len(result.content) > 0
-    text = result.content[0].text
-    assert isinstance(text, str)
+    result = await nexus_mcp_server.call_tool(
+        "nexus_hybrid_search", {"query": "security policy", "top_k": 2, "tenant_id": TEST_TENANT}
+    )
+    assert "No documents found" in result.content[0].text
+
+    # tenant_id is mandatory: a call without it must fail instead of searching a shared/default tenant
+    with pytest.raises(Exception):
+        await nexus_mcp_server.call_tool("nexus_hybrid_search", {"query": "security policy"})
+    with pytest.raises(Exception):
+        await nexus_mcp_server.call_tool("nexus_document_summarizer", {"document_id": "doc-1", "tenant_id": ""})
 
 
 @pytest.mark.asyncio
@@ -119,30 +155,61 @@ async def test_convert_mcp_to_langchain_tool_adapter(mock_mcp_manager):
 
 
 @pytest.mark.asyncio
-async def test_grpc_agent_servicer_list_and_exec():
-    """Verifies gRPC AgentService ListMcpTools and ExecuteAgentSync integration."""
+async def test_grpc_agent_servicer_list_and_exec(monkeypatch):
+    """ListMcpTools / ExecuteAgentSync enforce tenant context, the tool allowlist and server-side tenant_id."""
     servicer = AgentServiceServicer()
+    servicer.mcp_manager = MCPClientManager()
+    servicer.mcp_manager._initialized = True  # no external servers in unit tests
 
-    # Test ListMcpTools
-    req = agent_service_pb2.ListMcpToolsRequest()
-    resp = await servicer.ListMcpTools(req, None)
-    assert resp.total_tools >= 2
+    # ListMcpTools: requires a tenant; returns only allowlisted tools; hides the injected tenant_id param
+    with pytest.raises(_AbortError):
+        await servicer.ListMcpTools(agent_service_pb2.ListMcpToolsRequest(), FakeServicerContext())
+
+    resp = await servicer.ListMcpTools(
+        agent_service_pb2.ListMcpToolsRequest(context=_tenant_ctx()), FakeServicerContext()
+    )
     tool_names = [t.name for t in resp.tools]
-    assert "nexus_hybrid_search" in tool_names
-    assert "nexus_document_summarizer" in tool_names
+    assert {"nexus_hybrid_search", "nexus_document_summarizer"} <= set(tool_names)
+    for tool in resp.tools:
+        assert "tenant_id" not in json.loads(tool.input_schema_json).get("properties", {})
 
-    # Test ExecuteAgentSync routing
+    # ExecuteAgentSync: caller-supplied tenant_id is overridden with the trusted TenantContext tenant
+    captured = {}
+
+    async def fake_call_tool(server_name, tool_name, arguments):
+        captured.update(server_name=server_name, tool_name=tool_name, arguments=arguments)
+        return "ok"
+
+    monkeypatch.setattr(servicer.mcp_manager, "call_tool", fake_call_tool)
     query_req = agent_service_pb2.AgentQueryRequest(
+        context=_tenant_ctx(),
         task_id="test-task-100",
         user_prompt="Run vector search for enterprise compliance",
         mcp_tools_enabled=["nexus_hybrid_search"],
         session_parameters={
             "tool_name": "nexus_hybrid_search",
-            "tool_args": json.dumps({"query": "compliance", "top_k": 2})
-        }
+            "tool_args": json.dumps({"query": "compliance", "top_k": 2, "tenant_id": "attacker-tenant"}),
+        },
     )
-    query_resp = await servicer.ExecuteAgentSync(query_req, None)
-    assert query_resp.task_id == "test-task-100"
+    query_resp = await servicer.ExecuteAgentSync(query_req, FakeServicerContext())
     assert query_resp.execution_status == "COMPLETED"
-    assert "nexus_hybrid_search" in query_resp.response_text
-    assert query_resp.latency_ms >= 0
+    assert query_resp.total_tokens_used == 0
+    assert captured["arguments"]["tenant_id"] == TEST_TENANT
+    assert captured["server_name"] == "nexus-hub-mcp"
+
+    # Non-allowlisted tool is refused with PERMISSION_DENIED
+    ctx = FakeServicerContext()
+    bad_req = agent_service_pb2.AgentQueryRequest(
+        context=_tenant_ctx(), task_id="t-2", user_prompt="x",
+        session_parameters={"tool_name": "calculate_enterprise_metric"},
+    )
+    with pytest.raises(_AbortError):
+        await servicer.ExecuteAgentSync(bad_req, ctx)
+    import grpc
+    assert ctx.code == grpc.StatusCode.PERMISSION_DENIED
+
+    # Missing tenant context is refused with INVALID_ARGUMENT
+    ctx = FakeServicerContext()
+    with pytest.raises(_AbortError):
+        await servicer.ExecuteAgentSync(agent_service_pb2.AgentQueryRequest(task_id="t-3", user_prompt="x"), ctx)
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT

@@ -1,7 +1,9 @@
 package com.nexus.hub.grpc;
 
+import com.nexus.hub.common.exception.AiServiceException;
 import com.nexus.hub.common.exception.AiServiceTimeoutException;
 import com.nexus.hub.common.exception.AiServiceUnavailableException;
+import com.nexus.hub.config.GrpcClientConfig;
 import com.nexus.hub.grpc.ai.v1.*;
 import com.nexus.hub.grpc.client.AgentGrpcClient;
 import com.nexus.hub.grpc.client.GrpcContextHelper;
@@ -9,7 +11,12 @@ import com.nexus.hub.grpc.client.RagGrpcClient;
 import com.nexus.hub.modules.user.entity.Role;
 import com.nexus.hub.security.UserPrincipal;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.ServerInterceptors;
 import io.grpc.Status;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
@@ -19,6 +26,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -34,6 +43,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class GrpcClientIntegrationTest {
 
+    private static final String TEST_INTERNAL_API_KEY = "test-internal-api-key-0123456789";
+
+    private ApiKeyCapturingServerInterceptor apiKeyCaptor;
     private String serverName;
     private Server inProcessServer;
     private ManagedChannel inProcessChannel;
@@ -54,15 +66,18 @@ class GrpcClientIntegrationTest {
         fakeRagService = new FakeRagService();
         fakeAgentService = new FakeAgentService();
 
+        apiKeyCaptor = new ApiKeyCapturingServerInterceptor();
         inProcessServer = InProcessServerBuilder.forName(serverName)
                 .directExecutor()
-                .addService(fakeRagService)
-                .addService(fakeAgentService)
+                .addService(ServerInterceptors.intercept(fakeRagService, apiKeyCaptor))
+                .addService(ServerInterceptors.intercept(fakeAgentService, apiKeyCaptor))
                 .build()
                 .start();
 
+        // Same interceptor production wires onto the ManagedChannel in GrpcClientConfig
         inProcessChannel = InProcessChannelBuilder.forName(serverName)
                 .directExecutor()
+                .intercept(GrpcClientConfig.internalApiKeyInterceptor(TEST_INTERNAL_API_KEY))
                 .build();
 
         GrpcContextHelper contextHelper = new GrpcContextHelper();
@@ -110,37 +125,45 @@ class GrpcClientIntegrationTest {
     }
 
     @Test
-    @DisplayName("RagGrpcClient.ingestDocument should serialize request, propagate TenantContext, and deserialize response")
-    void testIngestDocumentSuccess() {
-        UUID documentId = UUID.randomUUID();
-        String filePath = "/shared-uploads/tenant-123/doc-test.pdf";
-        String mimeType = "application/pdf";
+    @DisplayName("deleteDocumentVectors propagates the full user TenantContext (tenant, user, trace, roles)")
+    void testDeleteDocumentVectorsPropagatesUserContext() {
+        ragGrpcClient.deleteDocumentVectors(UUID.randomUUID(), "enterprise_docs");
 
-        IngestDocumentResponse response = ragGrpcClient.ingestDocument(
-                documentId, filePath, mimeType, 600, 60, "enterprise_docs", Map.of("author", "Dr. Jane"));
-
-        assertThat(response).isNotNull();
-        assertThat(response.getSuccess()).isTrue();
-        assertThat(response.getDocumentId()).isEqualTo(documentId.toString());
-        assertThat(response.getChunksCreated()).isEqualTo(15);
-        assertThat(response.getVectorCollection()).isEqualTo("enterprise_docs");
-
-        // Verify request received on fake gRPC server
-        IngestDocumentRequest receivedRequest = fakeRagService.lastIngestRequest;
-        assertThat(receivedRequest).isNotNull();
-        assertThat(receivedRequest.getDocumentId()).isEqualTo(documentId.toString());
-        assertThat(receivedRequest.getFilePath()).isEqualTo(filePath);
-        assertThat(receivedRequest.getMimeType()).isEqualTo(mimeType);
-        assertThat(receivedRequest.getChunkSize()).isEqualTo(600);
-        assertThat(receivedRequest.getChunkOverlap()).isEqualTo(60);
-        assertThat(receivedRequest.getMetadataMap()).containsEntry("author", "Dr. Jane");
-
-        // Verify TenantContext propagation
+        DeleteDocumentRequest receivedRequest = fakeRagService.lastDeleteRequest;
         assertThat(receivedRequest.hasContext()).isTrue();
         assertThat(receivedRequest.getContext().getTenantId()).isEqualTo(expectedTenantId.toString());
         assertThat(receivedRequest.getContext().getUserId()).isEqualTo(expectedUserId.toString());
         assertThat(receivedRequest.getContext().getTraceId()).isEqualTo(expectedTraceId);
         assertThat(receivedRequest.getContext().getRolesList()).contains("ROLE_ADMIN");
+    }
+
+    @Test
+    @DisplayName("deleteOrphanDocumentVectors works without a principal using a system context for the GIVEN tenant")
+    void testOrphanDeleteUsesSystemContextForKnownTenant() {
+        SecurityContextHolder.clearContext();
+        UUID orphanTenant = UUID.randomUUID();
+        UUID docId = UUID.randomUUID();
+
+        DeleteDocumentResponse response = ragGrpcClient.deleteOrphanDocumentVectors(
+                orphanTenant, docId, "enterprise_docs", "trace-orphan-1");
+
+        assertThat(response.getSuccess()).isTrue();
+        DeleteDocumentRequest received = fakeRagService.lastDeleteRequest;
+        assertThat(received.getDocumentId()).isEqualTo(docId.toString());
+        assertThat(received.getContext().getTenantId()).isEqualTo(orphanTenant.toString());
+        assertThat(received.getContext().getUserId()).isEqualTo(GrpcContextHelper.SYSTEM_USER_ID);
+        assertThat(received.getContext().getTraceId()).isEqualTo("trace-orphan-1");
+        assertThat(received.getContext().getRolesList()).containsExactly(GrpcContextHelper.SYSTEM_ROLE);
+        assertThat(apiKeyCaptor.seenKeys).containsOnly(TEST_INTERNAL_API_KEY);
+    }
+
+    @Test
+    @DisplayName("System TenantContext requires an explicit tenant id (no random-tenant fallback)")
+    void testSystemContextRequiresTenant() {
+        SecurityContextHolder.clearContext();
+        assertThatThrownBy(() -> ragGrpcClient.deleteOrphanDocumentVectors(null, UUID.randomUUID(), "enterprise_docs", null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(fakeRagService.lastDeleteRequest).isNull();
     }
 
     @Test
@@ -190,7 +213,7 @@ class GrpcClientIntegrationTest {
     void testRagClientUnavailableFallback() {
         fakeRagService.failWithUnavailable = true;
 
-        assertThatThrownBy(() -> ragGrpcClient.ingestDocument(UUID.randomUUID(), "/test/doc.pdf", "text/plain", 500, 50))
+        assertThatThrownBy(() -> ragGrpcClient.deleteDocumentVectors(UUID.randomUUID(), "enterprise_docs"))
                 .isInstanceOf(AiServiceUnavailableException.class)
                 .hasMessageContaining("AI Service is currently unavailable");
     }
@@ -265,35 +288,74 @@ class GrpcClientIntegrationTest {
         assertThat(receivedEvents.get(2).getPhase()).isEqualTo(EventPhase.EVENT_PHASE_COMPLETED);
     }
 
+    @Test
+    @DisplayName("Every Rag and Agent call carries the x-internal-api-key metadata header")
+    void testInternalApiKeyAttachedToEveryCall() {
+        ragGrpcClient.hybridSearch("q", 3, 0.5f, false, "enterprise_docs", Map.of());
+        ragGrpcClient.deleteDocumentVectors(UUID.randomUUID(), "enterprise_docs");
+        agentGrpcClient.listMcpTools();
+        agentGrpcClient.executeAgentSync("hello", "sess-1");
+
+        assertThat(apiKeyCaptor.seenKeys).hasSize(4).containsOnly(TEST_INTERNAL_API_KEY);
+    }
+
+    @Test
+    @DisplayName("internalApiKeyInterceptor fails fast with a clear message when the key is blank")
+    void testBlankInternalApiKeyFailsFast() {
+        assertThatThrownBy(() -> GrpcClientConfig.internalApiKeyInterceptor("  "))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("INTERNAL_API_KEY");
+        assertThatThrownBy(() -> GrpcClientConfig.internalApiKeyInterceptor(null))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("UNAUTHENTICATED from ai-service maps to AiServiceException (502), not a user 401")
+    void testUnauthenticatedMapsToAiServiceException() {
+        fakeRagService.failWithUnauthenticated = true;
+
+        assertThatThrownBy(() -> ragGrpcClient.hybridSearch("q", 3, 0.5f, false, "enterprise_docs", Map.of()))
+                .isInstanceOf(AiServiceException.class)
+                .satisfies(ex -> assertThat(((AiServiceException) ex).getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+    }
+
+    @Test
+    @DisplayName("Calls without an authenticated principal are rejected instead of using a random tenant")
+    void testNoPrincipalIsRejected() {
+        SecurityContextHolder.clearContext();
+
+        assertThatThrownBy(() -> ragGrpcClient.hybridSearch("q", 3, 0.5f, false, "enterprise_docs", Map.of()))
+                .isInstanceOf(AuthenticationCredentialsNotFoundException.class);
+        assertThat(fakeRagService.lastSearchRequest).isNull();
+    }
+
     // -------------------------------------------------------------------------
     // Fake In-Memory Service Implementations
     // -------------------------------------------------------------------------
+    private static class ApiKeyCapturingServerInterceptor implements ServerInterceptor {
+        final List<String> seenKeys = new CopyOnWriteArrayList<>();
+
+        @Override
+        public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+            String key = headers.get(Metadata.Key.of("x-internal-api-key", Metadata.ASCII_STRING_MARSHALLER));
+            seenKeys.add(String.valueOf(key));
+            return next.startCall(call, headers);
+        }
+    }
+
     private static class FakeRagService extends RagServiceGrpc.RagServiceImplBase {
-        volatile IngestDocumentRequest lastIngestRequest;
         volatile HybridSearchRequest lastSearchRequest;
         volatile DeleteDocumentRequest lastDeleteRequest;
         volatile boolean failWithUnavailable = false;
-
-        @Override
-        public void ingestDocument(IngestDocumentRequest request, StreamObserver<IngestDocumentResponse> responseObserver) {
-            if (failWithUnavailable) {
-                responseObserver.onError(Status.UNAVAILABLE.withDescription("Service offline").asRuntimeException());
-                return;
-            }
-            this.lastIngestRequest = request;
-            IngestDocumentResponse response = IngestDocumentResponse.newBuilder()
-                    .setDocumentId(request.getDocumentId())
-                    .setSuccess(true)
-                    .setChunksCreated(15)
-                    .setVectorCollection(request.getVectorCollection())
-                    .setMessage("Indexed successfully")
-                    .build();
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        }
+        volatile boolean failWithUnauthenticated = false;
 
         @Override
         public void hybridSearch(HybridSearchRequest request, StreamObserver<HybridSearchResponse> responseObserver) {
+            if (failWithUnauthenticated) {
+                responseObserver.onError(Status.UNAUTHENTICATED.withDescription("bad internal key").asRuntimeException());
+                return;
+            }
             this.lastSearchRequest = request;
             DocumentChunk chunk1 = DocumentChunk.newBuilder()
                     .setChunkId("chk-001")
@@ -328,6 +390,10 @@ class GrpcClientIntegrationTest {
 
         @Override
         public void deleteDocumentVectors(DeleteDocumentRequest request, StreamObserver<DeleteDocumentResponse> responseObserver) {
+            if (failWithUnavailable) {
+                responseObserver.onError(Status.UNAVAILABLE.withDescription("Service offline").asRuntimeException());
+                return;
+            }
             this.lastDeleteRequest = request;
             DeleteDocumentResponse response = DeleteDocumentResponse.newBuilder()
                     .setDocumentId(request.getDocumentId())

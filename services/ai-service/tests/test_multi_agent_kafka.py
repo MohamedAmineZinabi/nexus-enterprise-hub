@@ -9,7 +9,7 @@ from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
 
 from app.core.config import settings
 from app.agents.graph import get_agent_graph
-from app.agents.state import AgentWorkflowState
+from app.agents.state import build_initial_state
 from app.kafka.producer import AgentEventPublisher
 from app.kafka.consumer import KafkaTaskConsumer
 
@@ -25,48 +25,34 @@ async def test_direct_langgraph_multi_agent_execution():
     test_task_id = f"test-task-{uuid.uuid4()}"
     test_tenant_id = "d5569b60-2545-4c7b-be8a-4aa7b787de67"
 
-    initial_state: AgentWorkflowState = {
-        "task_id": test_task_id,
-        "tenant_id": test_tenant_id,
-        "user_prompt": "Explain multi-tenant vector isolation in Qdrant and cross-encoder verification",
-        "trace_id": f"trace-{test_task_id}",
-        "document_ids": [],
-        "metadata": {},
-        "plan": [],
-        "research_data": [],
-        "draft_report": "",
-        "critique": {},
-        "iteration_count": 0,
-        "current_node": "START",
-        "status": "PROCESSING"
-    }
+    initial_state = build_initial_state(
+        task_id=test_task_id,
+        tenant_id=test_tenant_id,
+        user_prompt="Explain multi-tenant vector isolation in Qdrant and cross-encoder verification",
+        trace_id=f"trace-{test_task_id}",
+    )
 
     config = {"configurable": {"thread_id": test_task_id}}
     final_state = await graph.ainvoke(initial_state, config=config)
 
-    # 1. Assert Plan decomposition
-    assert "plan" in final_state
+    # 1. Plan: the original question is always the first query
+    assert final_state["plan"][0].startswith("Explain multi-tenant vector isolation")
     assert len(final_state["plan"]) >= 2
-    assert any("vector" in step.lower() or "isolation" in step.lower() for step in final_state["plan"])
 
-    # 2. Assert Researcher outputs
-    assert "research_data" in final_state
+    # 2. Researcher outputs (may be empty for a fresh tenant)
     assert isinstance(final_state["research_data"], list)
+    assert isinstance(final_state["errors"], list)
 
-    # 3. Assert Synthesizer generated markdown report with footnotes
-    assert "draft_report" in final_state
+    # 3. Report is honest and titled with the question
     report = final_state["draft_report"]
-    assert "# Executive" in report
-    assert "multi-tenant" in report.lower()
+    assert report.startswith("# Research Report:")
+    assert "zero-hallucination" not in report.lower()
 
-    # 4. Assert Critic verification
-    assert "critique" in final_state
+    # 4. Critic ran and the loop is bounded by MAX_AGENT_ITERATIONS
     critique = final_state["critique"]
-    assert "is_valid" in critique
-    assert "hallucination_score" in critique
-    assert critique["is_valid"] is True
+    assert {"is_valid", "hallucination_score", "feedback"} <= set(critique)
     assert final_state["status"] == "CRITIQUE_COMPLETED"
-    assert final_state["iteration_count"] >= 1
+    assert 1 <= final_state["iteration_count"] <= settings.max_agent_iterations
 
 
 @pytest.mark.asyncio

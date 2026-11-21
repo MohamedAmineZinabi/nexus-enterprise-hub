@@ -221,6 +221,12 @@ public class AgentGrpcClient {
                 return new AiServiceTimeoutException("AI Service timed out after " + deadlineMs + "ms on " + operation);
             case INVALID_ARGUMENT:
                 return new AiServiceException("Invalid argument sent to AI Service: " + description, HttpStatus.BAD_REQUEST);
+            case UNAUTHENTICATED:
+                // Service-to-service credential problem (x-internal-api-key mismatch), NOT an end-user auth failure.
+                log.error("AI Service rejected core-service internal credentials on {}. "
+                        + "Check that INTERNAL_API_KEY matches on both services.", operation);
+                return new AiServiceException("AI Service integration is misconfigured; please contact an administrator",
+                        HttpStatus.BAD_GATEWAY);
             default:
                 return new AiServiceException("AI Service gRPC error [" + code + "]: " + description, HttpStatus.BAD_GATEWAY);
         }

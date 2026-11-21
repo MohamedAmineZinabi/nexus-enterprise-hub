@@ -60,6 +60,26 @@ class Settings(BaseSettings):
         validation_alias="MAX_AGENT_ITERATIONS"
     )
 
+    # Internal service-to-service authentication (REQUIRED, no default).
+    # Every gRPC call and every /api/v1/* or /mcp/* HTTP request must present this key.
+    internal_api_key: str = Field(..., min_length=16, validation_alias="INTERNAL_API_KEY")
+
+    # MCP SSE transport DNS-rebinding protection (comma-separated host[:port] patterns)
+    mcp_allowed_hosts: str = Field(
+        default="ai-service:*,nexus-ai-service:*,localhost:*,127.0.0.1:*",
+        validation_alias="MCP_ALLOWED_HOSTS"
+    )
+
+    # Vector collections callers may target (comma-separated allowlist)
+    allowed_collections: str = Field(default="enterprise_docs", validation_alias="ALLOWED_COLLECTIONS")
+
+    # Optional OpenAI-compatible LLM (OpenAI, Groq, Ollama, vLLM...). Unset key => deterministic mode.
+    llm_api_key: Optional[str] = Field(default=None, validation_alias="LLM_API_KEY")
+    llm_base_url: Optional[str] = Field(default=None, validation_alias="LLM_BASE_URL")
+    llm_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_MODEL")
+    llm_temperature: float = Field(default=0.0, validation_alias="LLM_TEMPERATURE")
+    llm_timeout_seconds: float = Field(default=60.0, validation_alias="LLM_TIMEOUT_SECONDS")
+
     # Kafka Messaging Configuration
     kafka_bootstrap_servers: str = Field(
         default="nexus-kafka:29092",
@@ -86,11 +106,46 @@ class Settings(BaseSettings):
         validation_alias="KAFKA_TOPIC_TASK_DLQ"
     )
 
+    # Asynchronous document ingestion (core-service -> ai-service -> core-service)
+    kafka_topic_document_ingest_requested: str = Field(
+        default="document.ingest.requested",
+        validation_alias="KAFKA_TOPIC_DOCUMENT_INGEST_REQUESTED"
+    )
+    kafka_topic_document_ingest_completed: str = Field(
+        default="document.ingest.completed",
+        validation_alias="KAFKA_TOPIC_DOCUMENT_INGEST_COMPLETED"
+    )
+    kafka_ingest_group_id: str = Field(default="nexus-ai-ingest", validation_alias="KAFKA_INGEST_GROUP_ID")
+    # Large documents can take minutes to embed on CPU; keep the consumer in the group meanwhile
+    kafka_ingest_max_poll_interval_ms: int = Field(
+        default=1_800_000, validation_alias="KAFKA_INGEST_MAX_POLL_INTERVAL_MS"
+    )
+    ingest_lock_ttl_seconds: int = Field(default=300, validation_alias="INGEST_LOCK_TTL_SECONDS")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @property
+    def llm_enabled(self) -> bool:
+        return bool(self.llm_api_key and self.llm_api_key.strip())
+
+    @property
+    def allowed_collection_set(self) -> set:
+        return {c.strip() for c in self.allowed_collections.split(",") if c.strip()}
+
+    @property
+    def mcp_allowed_host_list(self) -> list:
+        return [h.strip() for h in self.mcp_allowed_hosts.split(",") if h.strip()]
+
+    def resolve_collection(self, requested: Optional[str]) -> str:
+        """Returns the requested collection if allowlisted, the default if blank; raises otherwise."""
+        name = (requested or "").strip() or self.qdrant_collection_name
+        if name not in self.allowed_collection_set and name != self.qdrant_collection_name:
+            raise ValueError(f"Vector collection '{name}' is not allowed")
+        return name
 
 
 settings = Settings()

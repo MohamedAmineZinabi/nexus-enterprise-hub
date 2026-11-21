@@ -29,6 +29,8 @@ TOPICS=(
   "agent.task.events"
   "agent.task.completed"
   "agent.task.dlq"
+  "document.ingest.requested"
+  "document.ingest.completed"
 )
 
 PARTITIONS=3

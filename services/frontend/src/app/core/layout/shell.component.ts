@@ -1,7 +1,21 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { HttpClient, HttpContext, HttpErrorResponse } from '@angular/common/http';
+import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { catchError, forkJoin, map, of, switchMap, timer } from 'rxjs';
 import { AuthService } from '../services/auth.service';
+import { SILENT_HTTP_ERRORS } from '../interceptors/error.interceptor';
+
+const HEALTH_POLL_INTERVAL_MS = 30000;
+
+type SystemStatus = 'Checking' | 'Online' | 'Degraded' | 'Offline';
+
+interface HealthProbe {
+  gateway: boolean;
+  api: boolean;
+  checked: boolean;
+}
 
 interface NavItem {
   label: string;
@@ -40,7 +54,6 @@ interface NavItem {
             </div>
             <div class="hidden sm:block">
               <span class="text-base font-bold tracking-tight text-white">NexusEnterprise</span>
-              <span class="ml-2 text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-950 text-brand-300 border border-brand-800/80">v2.0</span>
             </div>
           </div>
         </div>
@@ -147,25 +160,33 @@ interface NavItem {
           <!-- System Status Footer -->
           <div class="p-4 border-t border-slate-800 bg-slate-950/40">
             <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
-              <span class="font-medium text-slate-300">Cluster Status</span>
-              <span class="text-[10px] font-mono text-emerald-400 flex items-center gap-1.5">
-                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                HEALTHY
+              <span class="font-medium text-slate-300">System Status</span>
+              <span
+                class="text-[10px] font-mono flex items-center gap-1.5 uppercase"
+                [class]="statusTextClass()"
+                role="status"
+                aria-live="polite"
+              >
+                <span class="w-1.5 h-1.5 rounded-full" [class]="statusDotClass()"></span>
+                {{ systemStatus() }}
               </span>
             </div>
             <div class="space-y-1 text-[11px] font-mono text-slate-400">
               <div class="flex items-center justify-between">
-                <span>Kafka KRaft</span>
-                <span class="text-slate-300">29092</span>
+                <span>Gateway</span>
+                <span [class]="probe().gateway ? 'text-emerald-400' : 'text-red-400'">
+                  {{ probe().checked ? (probe().gateway ? 'UP' : 'DOWN') : '...' }}
+                </span>
               </div>
               <div class="flex items-center justify-between">
-                <span>Qdrant RAG</span>
-                <span class="text-slate-300">6333</span>
+                <span>Core API</span>
+                <span [class]="probe().api ? 'text-emerald-400' : 'text-red-400'">
+                  {{ probe().checked ? (probe().api ? 'UP' : 'DOWN') : '...' }}
+                </span>
               </div>
-              <div class="flex items-center justify-between">
-                <span>Redis Locks</span>
-                <span class="text-slate-300">6379</span>
-              </div>
+              @if (lastChecked(); as checkedAt) {
+                <div class="text-[10px] text-slate-500 pt-1">Checked {{ checkedAt | date:'HH:mm:ss' }}</div>
+              }
             </div>
           </div>
         </aside>
@@ -190,7 +211,7 @@ interface NavItem {
 })
 export class ShellComponent {
   private readonly authService = inject(AuthService);
-  private readonly router = inject(Router);
+  private readonly http = inject(HttpClient);
 
   readonly sidebarOpen = signal<boolean>(false);
 
@@ -210,8 +231,61 @@ export class ShellComponent {
   readonly navItems: NavItem[] = [
     { label: 'Executive Dashboard', route: '/dashboard', icon: 'dashboard' },
     { label: 'Knowledge Base / RAG', route: '/knowledge-base', icon: 'knowledge', badge: 'RAG' },
-    { label: 'Agent Studio', route: '/agent-studio', icon: 'agents', badge: 'Day 13' }
+    { label: 'Agent Studio', route: '/agent-studio', icon: 'agents' }
   ];
+
+  // Live gateway / API health indicator
+  readonly probe = signal<HealthProbe>({ gateway: false, api: false, checked: false });
+  readonly lastChecked = signal<Date | null>(null);
+
+  readonly systemStatus = computed<SystemStatus>(() => {
+    const p = this.probe();
+    if (!p.checked) return 'Checking';
+    if (p.gateway && p.api) return 'Online';
+    if (p.gateway || p.api) return 'Degraded';
+    return 'Offline';
+  });
+
+  readonly statusTextClass = computed(() => {
+    switch (this.systemStatus()) {
+      case 'Online': return 'text-emerald-400';
+      case 'Degraded': return 'text-amber-400';
+      case 'Offline': return 'text-red-400';
+      default: return 'text-slate-400';
+    }
+  });
+
+  readonly statusDotClass = computed(() => {
+    switch (this.systemStatus()) {
+      case 'Online': return 'bg-emerald-500';
+      case 'Degraded': return 'bg-amber-500 animate-pulse';
+      case 'Offline': return 'bg-red-500 animate-pulse';
+      default: return 'bg-slate-500';
+    }
+  });
+
+  constructor() {
+    const silent = new HttpContext().set(SILENT_HTTP_ERRORS, true);
+
+    const gateway$ = this.http.get('/nginx-health', { responseType: 'text', context: silent }).pipe(
+      map(() => true),
+      catchError(() => of(false))
+    );
+    // Cheap authenticated call: proves core-service, JWT validation and the token
+    // revocation store are all reachable. 429 still means the API is up.
+    const api$ = this.http.get('/api/v1/auth/me', { context: silent }).pipe(
+      map(() => true),
+      catchError((err: unknown) => of(err instanceof HttpErrorResponse && err.status === 429))
+    );
+
+    timer(0, HEALTH_POLL_INTERVAL_MS).pipe(
+      switchMap(() => forkJoin({ gateway: gateway$, api: api$ })),
+      takeUntilDestroyed()
+    ).subscribe(({ gateway, api }) => {
+      this.probe.set({ gateway, api, checked: true });
+      this.lastChecked.set(new Date());
+    });
+  }
 
   toggleSidebar(): void {
     this.sidebarOpen.update(v => !v);

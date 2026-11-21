@@ -40,52 +40,8 @@ public class RagGrpcClient {
         this.deadlineMs = deadlineMs;
     }
 
-    @CircuitBreaker(name = CB_NAME, fallbackMethod = "ingestDocumentShortFallback")
-    @Retry(name = RETRY_NAME)
-    public IngestDocumentResponse ingestDocument(UUID documentId, String filePath, String mimeType, int chunkSize, int chunkOverlap) {
-        return doIngestDocument(documentId, filePath, mimeType, chunkSize, chunkOverlap, "enterprise_docs", Collections.emptyMap());
-    }
-
-    @CircuitBreaker(name = CB_NAME, fallbackMethod = "ingestDocumentFallback")
-    @Retry(name = RETRY_NAME)
-    public IngestDocumentResponse ingestDocument(
-            UUID documentId,
-            String filePath,
-            String mimeType,
-            int chunkSize,
-            int chunkOverlap,
-            String vectorCollection,
-            Map<String, String> metadata) {
-        return doIngestDocument(documentId, filePath, mimeType, chunkSize, chunkOverlap, vectorCollection, metadata);
-    }
-
-    private IngestDocumentResponse doIngestDocument(
-            UUID documentId,
-            String filePath,
-            String mimeType,
-            int chunkSize,
-            int chunkOverlap,
-            String vectorCollection,
-            Map<String, String> metadata) {
-        TenantContext context = contextHelper.buildTenantContext();
-        IngestDocumentRequest request = IngestDocumentRequest.newBuilder()
-                .setContext(context)
-                .setDocumentId(documentId.toString())
-                .setFilePath(filePath)
-                .setMimeType(mimeType)
-                .setChunkSize(chunkSize > 0 ? chunkSize : 500)
-                .setChunkOverlap(chunkOverlap >= 0 ? chunkOverlap : 50)
-                .setVectorCollection(vectorCollection != null ? vectorCollection : "enterprise_docs")
-                .putAllMetadata(metadata != null ? metadata : Collections.emptyMap())
-                .build();
-
-        log.info("Dispatching gRPC IngestDocument for documentId: {}, file: {}", documentId, filePath);
-        try {
-            return ragStub.withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS).ingestDocument(request);
-        } catch (StatusRuntimeException e) {
-            throw handleStatusRuntimeException("IngestDocument", e);
-        }
-    }
+    // NOTE: document ingestion is asynchronous over Kafka (document.ingest.requested /
+    // document.ingest.completed); the synchronous IngestDocument RPC is no longer called.
 
     @CircuitBreaker(name = CB_NAME, fallbackMethod = "hybridSearchShortFallback")
     @Retry(name = RETRY_NAME)
@@ -134,17 +90,28 @@ public class RagGrpcClient {
     @CircuitBreaker(name = CB_NAME, fallbackMethod = "deleteDocumentVectorsShortFallback")
     @Retry(name = RETRY_NAME)
     public DeleteDocumentResponse deleteDocumentVectors(UUID documentId) {
-        return doDeleteDocumentVectors(documentId, "enterprise_docs");
+        return doDeleteDocumentVectors(contextHelper.buildTenantContext(), documentId, "enterprise_docs");
     }
 
     @CircuitBreaker(name = CB_NAME, fallbackMethod = "deleteDocumentVectorsFallback")
     @Retry(name = RETRY_NAME)
     public DeleteDocumentResponse deleteDocumentVectors(UUID documentId, String collectionName) {
-        return doDeleteDocumentVectors(documentId, collectionName);
+        return doDeleteDocumentVectors(contextHelper.buildTenantContext(), documentId, collectionName);
     }
 
-    private DeleteDocumentResponse doDeleteDocumentVectors(UUID documentId, String collectionName) {
-        TenantContext context = contextHelper.buildTenantContext();
+    /**
+     * Background orphan-vector cleanup for a document that was deleted while ai-service was indexing
+     * it. There is no authenticated user on the Kafka consumer thread, so the TenantContext is built
+     * for a system caller from the event's (known) tenant id. Used ONLY by DocumentIngestCompletedConsumer.
+     */
+    @CircuitBreaker(name = CB_NAME, fallbackMethod = "deleteOrphanDocumentVectorsFallback")
+    @Retry(name = RETRY_NAME)
+    public DeleteDocumentResponse deleteOrphanDocumentVectors(
+            UUID tenantId, UUID documentId, String collectionName, String traceId) {
+        return doDeleteDocumentVectors(contextHelper.buildSystemTenantContext(tenantId, traceId), documentId, collectionName);
+    }
+
+    private DeleteDocumentResponse doDeleteDocumentVectors(TenantContext context, UUID documentId, String collectionName) {
         DeleteDocumentRequest request = DeleteDocumentRequest.newBuilder()
                 .setContext(context)
                 .setDocumentId(documentId.toString())
@@ -162,21 +129,6 @@ public class RagGrpcClient {
     // -------------------------------------------------------------------------
     // Resilience4j CircuitBreaker Fallbacks (Invoked when circuit state is OPEN)
     // -------------------------------------------------------------------------
-
-    @SuppressWarnings("unused")
-    private IngestDocumentResponse ingestDocumentShortFallback(
-            UUID documentId, String filePath, String mimeType, int chunkSize, int chunkOverlap,
-            CallNotPermittedException ex) {
-        throw openCircuitException("ingestDocument", ex);
-    }
-
-    @SuppressWarnings("unused")
-    private IngestDocumentResponse ingestDocumentFallback(
-            UUID documentId, String filePath, String mimeType, int chunkSize, int chunkOverlap,
-            String vectorCollection, Map<String, String> metadata,
-            CallNotPermittedException ex) {
-        throw openCircuitException("ingestDocument", ex);
-    }
 
     @SuppressWarnings("unused")
     private HybridSearchResponse hybridSearchShortFallback(
@@ -205,6 +157,12 @@ public class RagGrpcClient {
         throw openCircuitException("deleteDocumentVectors", ex);
     }
 
+    @SuppressWarnings("unused")
+    private DeleteDocumentResponse deleteOrphanDocumentVectorsFallback(
+            UUID tenantId, UUID documentId, String collectionName, String traceId, CallNotPermittedException ex) {
+        throw openCircuitException("deleteOrphanDocumentVectors", ex);
+    }
+
     private AiServiceUnavailableException openCircuitException(String operation, CallNotPermittedException ex) {
         log.warn("CircuitBreaker '{}' is OPEN. Fast-failing RAG gRPC operation '{}': {}", CB_NAME, operation, ex.getMessage());
         return new AiServiceUnavailableException(
@@ -223,6 +181,12 @@ public class RagGrpcClient {
                 return new AiServiceTimeoutException("AI Service timed out after " + deadlineMs + "ms on " + operation);
             case INVALID_ARGUMENT:
                 return new AiServiceException("Invalid argument sent to AI Service: " + description, HttpStatus.BAD_REQUEST);
+            case UNAUTHENTICATED:
+                // Service-to-service credential problem (x-internal-api-key mismatch), NOT an end-user auth failure.
+                log.error("AI Service rejected core-service internal credentials on {}. "
+                        + "Check that INTERNAL_API_KEY matches on both services.", operation);
+                return new AiServiceException("AI Service integration is misconfigured; please contact an administrator",
+                        HttpStatus.BAD_GATEWAY);
             default:
                 return new AiServiceException("AI Service gRPC error [" + code + "]: " + description, HttpStatus.BAD_GATEWAY);
         }

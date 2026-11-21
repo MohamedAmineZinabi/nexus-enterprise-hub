@@ -1,6 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { HttpClient, HttpEvent, HttpEventType } from '@angular/common/http';
-import { Observable, tap, catchError, map, of, finalize } from 'rxjs';
+import { HttpClient, HttpContext, HttpEvent, HttpEventType } from '@angular/common/http';
+import { Observable, tap, catchError, map, finalize } from 'rxjs';
+import { SILENT_HTTP_ERRORS } from '../interceptors/error.interceptor';
 import {
   DocumentItem,
   DocumentUploadResponse,
@@ -27,10 +28,14 @@ export class DocumentService {
 
   /**
    * Fetches all tenant documents from backend and updates the `documents` signal.
+   * `background` refreshes (status polling) skip the loading spinner and global error toasts.
    */
-  loadDocuments(): Observable<DocumentItem[]> {
-    this.isLoading.set(true);
-    return this.http.get<ApiResponse<DocumentItem[]>>('/api/v1/documents').pipe(
+  loadDocuments(background: boolean = false): Observable<DocumentItem[]> {
+    if (!background) {
+      this.isLoading.set(true);
+    }
+    const context = new HttpContext().set(SILENT_HTTP_ERRORS, background);
+    return this.http.get<ApiResponse<DocumentItem[]>>('/api/v1/documents', { context }).pipe(
       map(res => (res.data || []).map(doc => ({
         ...doc,
         documentId: doc.documentId || doc.id,
@@ -40,11 +45,11 @@ export class DocumentService {
       }))),
       tap(items => {
         this.documents.set(items);
-        this.isLoading.set(false);
       }),
-      catchError(err => {
-        this.isLoading.set(false);
-        throw err;
+      finalize(() => {
+        if (!background) {
+          this.isLoading.set(false);
+        }
       })
     );
   }
@@ -81,8 +86,10 @@ export class DocumentService {
             this.isUploading.set(false);
             this.uploadProgress.set(100);
             if (body && body.data) {
-              // Immediately refresh documents list
-              this.loadDocuments().subscribe();
+              // 202 Accepted: indexing continues asynchronously. Show the document
+              // right away (typically INDEXING); the knowledge base polls for completion.
+              this.upsertFromUpload(body.data, file);
+              this.loadDocuments(true).subscribe({ error: () => undefined });
               observer.next(body.data);
               observer.complete();
             } else {
@@ -97,6 +104,23 @@ export class DocumentService {
         }
       });
     });
+  }
+
+  private upsertFromUpload(res: DocumentUploadResponse, file: File): void {
+    const item: DocumentItem = {
+      id: res.documentId,
+      documentId: res.documentId,
+      filename: res.fileName || file.name,
+      fileName: res.fileName || file.name,
+      fileSize: file.size,
+      fileSizeBytes: file.size,
+      vectorCollection: res.vectorCollection,
+      status: res.status || 'INDEXING',
+      chunksCount: res.chunksCreated ?? 0,
+      chunksCreated: res.chunksCreated ?? 0,
+      createdAt: res.createdAt || new Date().toISOString()
+    };
+    this.documents.update(list => [item, ...list.filter(d => d.id !== item.id)]);
   }
 
   /**

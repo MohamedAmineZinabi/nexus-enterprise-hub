@@ -6,15 +6,10 @@ import { AuthService } from '../../core/services/auth.service';
 import { AgentStudioService } from '../../core/services/agent-studio.service';
 import { DocumentService } from '../../core/services/document.service';
 import {
-  AgentNodeName,
-  CitationItem,
   CreateTaskRequest,
   NodeExecutionState,
-  TaskProgressEvent,
-  TaskSummary,
   TaskType
 } from '../../core/models/agent.models';
-import { DocumentItem } from '../../core/models/document.models';
 
 interface QuickPromptChip {
   label: string;
@@ -706,7 +701,8 @@ export class AgentStudioComponent implements OnInit, OnDestroy {
     switch (status) {
       case 'COMPLETED':
         return base + 'bg-emerald-950 text-emerald-400 ring-emerald-800';
-      case 'IN_PROGRESS':
+      case 'PROCESSING':
+        return base + 'bg-brand-950 text-brand-300 ring-brand-800';
       case 'PENDING':
         return base + 'bg-yellow-950 text-yellow-400 ring-yellow-800';
       case 'FAILED':

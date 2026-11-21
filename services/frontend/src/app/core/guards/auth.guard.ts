@@ -6,7 +6,7 @@ import { AuthService } from '../services/auth.service';
  * Functional route guard (CanActivateFn) that prevents unauthenticated users
  * from accessing protected enterprise shell modules.
  */
-export const authGuard: CanActivateFn = (route, state) => {
+export const authGuard: CanActivateFn = (_route, state) => {
   const authService = inject(AuthService);
   const router = inject(Router);
 

@@ -1,5 +1,5 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Router } from '@angular/router';
 import { Observable, tap, catchError, of, map } from 'rxjs';
 import {
@@ -113,8 +113,12 @@ export class AuthService {
           localStorage.setItem(TENANT_KEY, JSON.stringify(tenant));
         }
       }),
-      catchError(() => {
-        this.clearSession();
+      catchError((err: unknown) => {
+        // Only a 401 means the token is invalid/expired/revoked. Network errors,
+        // 5xx and 503 (revocation store down) must not destroy a valid session.
+        if (err instanceof HttpErrorResponse && err.status === 401) {
+          this.clearSession();
+        }
         return of(null);
       })
     );

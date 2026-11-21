@@ -8,7 +8,7 @@
         "app.mcp.servers.filesystem_server"
       ],
       "env": {
-        "ALLOWED_DIRS": "/shared-uploads"
+        "SHARED_UPLOADS_DIR": "/shared-uploads"
       },
       "description": "Enterprise filesystem MCP server for shared document operations"
     },
@@ -16,6 +16,7 @@
       "transport": "sse",
       "url": "http://localhost:8000/mcp/sse",
       "headers": {},
+      "internal": true,
       "description": "Nexus Hub internal MCP SSE bridge for hybrid RAG and document summarization"
     }
   }

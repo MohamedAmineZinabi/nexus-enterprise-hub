@@ -27,8 +27,11 @@ public class TaskProgressEventDto {
     @JsonAlias({"status", "phase"})
     private String status;
 
-    @JsonAlias({"durationMs", "timestampMs"})
+    /** Elapsed milliseconds since the task started processing (a duration, not a timestamp). */
     private Long durationMs;
+
+    /** Epoch-millis emission time of the event; kept separate from durationMs. */
+    private Long timestampMs;
 
     private Map<String, Object> payload;
 

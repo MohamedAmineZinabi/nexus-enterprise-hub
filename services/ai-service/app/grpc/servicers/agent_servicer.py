@@ -1,14 +1,22 @@
+import copy
 import time
 import json
 import logging
-import asyncio
-from typing import List, Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, List
 
 import grpc
 from app.grpc.generated.ai.v1 import agent_service_pb2, agent_service_pb2_grpc
 from app.mcp.client_manager import get_mcp_client_manager
+from app.mcp.server import nexus_mcp_server
+from app.mcp.tenant_tools import (
+    ALLOWED_TENANT_TOOLS,
+    InvalidToolArgumentError,
+    ToolNotAllowedError,
+    call_tenant_scoped_tool,
+)
 from app.agents.graph import get_agent_graph
-from app.agents.state import AgentWorkflowState
+from app.agents.state import build_initial_state
+from app.security.auth import require_tenant_id, TenantValidationError
 
 logger = logging.getLogger("nexus.grpc.agent_servicer")
 
@@ -22,8 +30,29 @@ NODE_TYPE_MAP = {
 }
 
 
+async def _require_tenant(request, context) -> str:
+    """Returns the trusted tenant_id from TenantContext or aborts the RPC with INVALID_ARGUMENT."""
+    raw = request.context.tenant_id if request.HasField("context") else ""
+    try:
+        return require_tenant_id(raw)
+    except TenantValidationError as exc:
+        await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"TenantContext.{exc}")
+        raise  # unreachable with a real context; keeps type-checkers and test doubles honest
+
+
+def _public_schema(schema: Any) -> str:
+    """Hides the server-injected tenant_id parameter from schemas shown to callers."""
+    if not isinstance(schema, dict):
+        return json.dumps(schema or {})
+    cleaned = copy.deepcopy(schema)
+    cleaned.get("properties", {}).pop("tenant_id", None)
+    if isinstance(cleaned.get("required"), list):
+        cleaned["required"] = [r for r in cleaned["required"] if r != "tenant_id"]
+    return json.dumps(cleaned)
+
+
 class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
-    """Production gRPC servicer for multi-agent workflows, live streaming, and MCP discovery."""
+    """gRPC servicer for multi-agent workflows, live streaming, and tenant-safe MCP tool discovery."""
 
     def __init__(self):
         self.mcp_manager = get_mcp_client_manager()
@@ -34,165 +63,132 @@ class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
         request: agent_service_pb2.ListMcpToolsRequest,
         context: grpc.aio.ServicerContext
     ) -> agent_service_pb2.ListMcpToolsResponse:
-        """Discovers and returns all MCP tools registered natively and externally."""
-        tenant_id = request.context.tenant_id if request.HasField("context") else ""
+        """Returns the MCP tools a tenant may execute (native in-process tools + allowlisted external tools)."""
+        tenant_id = await _require_tenant(request, context)
         logger.info(f"AgentService.ListMcpTools called for tenant: '{tenant_id}'")
 
-        tools_dict: Dict[str, agent_service_pb2.McpToolDefinition] = {}
+        tools: Dict[str, agent_service_pb2.McpToolDefinition] = {}
 
-        # 1. Native Nexus Hub MCP Tools
-        tools_dict["nexus_hybrid_search"] = agent_service_pb2.McpToolDefinition(
-            name="nexus_hybrid_search",
-            description="Performs dense vector and sparse BM25 hybrid search with Cross-Encoder reranking over Nexus Hub indexed enterprise documents",
-            input_schema_json=json.dumps({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query text"},
-                    "top_k": {"type": "integer", "description": "Number of results to retrieve", "default": 5},
-                    "alpha": {"type": "number", "description": "Hybrid balance (0.0 sparse to 1.0 dense)", "default": 0.7}
-                },
-                "required": ["query"]
-            }),
-            server_origin="mcp://ai-service:50051"
-        )
-
-        tools_dict["nexus_document_summarizer"] = agent_service_pb2.McpToolDefinition(
-            name="nexus_document_summarizer",
-            description="Summarizes enterprise documents with citation extraction from Qdrant vector store",
-            input_schema_json=json.dumps({
-                "type": "object",
-                "properties": {
-                    "document_id": {"type": "string", "description": "UUID of document to summarize"}
-                },
-                "required": ["document_id"]
-            }),
-            server_origin="mcp://ai-service:50051"
-        )
-
-        # 2. External MCP Tools discovered via MCPClientManager
         try:
-            external_tools = await self.mcp_manager.list_all_tools()
-            for ext in external_tools:
-                name = ext.get("name")
-                if not name:
+            for t in await nexus_mcp_server.list_tools():
+                if t.name not in ALLOWED_TENANT_TOOLS:
                     continue
+                schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
+                tools[t.name] = agent_service_pb2.McpToolDefinition(
+                    name=t.name,
+                    description=t.description or "",
+                    input_schema_json=_public_schema(schema),
+                    server_origin="mcp://nexus-hub-mcp",
+                )
+        except Exception as exc:
+            logger.warning(f"Could not list native MCP tools: {exc}")
 
-                schema_json = ext.get("inputSchema") or ext.get("input_schema") or {}
-                if isinstance(schema_json, dict):
-                    schema_str = json.dumps(schema_json)
-                else:
-                    schema_str = str(schema_json)
-
-                tools_dict[name] = agent_service_pb2.McpToolDefinition(
+        try:
+            for ext in await self.mcp_manager.list_all_tools():
+                name = ext.get("name")
+                if not name or name in tools or name not in ALLOWED_TENANT_TOOLS:
+                    continue
+                tools[name] = agent_service_pb2.McpToolDefinition(
                     name=name,
                     description=ext.get("description", ""),
-                    input_schema_json=schema_str,
-                    server_origin=ext.get("server_origin", f"mcp://{ext.get('server_name', 'external')}")
+                    input_schema_json=_public_schema(ext.get("inputSchema") or ext.get("input_schema")),
+                    server_origin=str(ext.get("server_origin") or f"mcp://{ext.get('server_name', 'external')}"),
                 )
         except Exception as exc:
             logger.warning(f"Could not discover external MCP tools: {exc}")
 
-        result_tools = list(tools_dict.values())
-        logger.info(f"Returning {len(result_tools)} total MCP tools to caller.")
-        return agent_service_pb2.ListMcpToolsResponse(
-            tools=result_tools,
-            total_tools=len(result_tools)
-        )
+        result_tools = list(tools.values())
+        return agent_service_pb2.ListMcpToolsResponse(tools=result_tools, total_tools=len(result_tools))
 
     async def ExecuteAgentSync(
         self,
         request: agent_service_pb2.AgentQueryRequest,
         context: grpc.aio.ServicerContext
     ) -> agent_service_pb2.AgentQueryResponse:
-        """Executes a synchronous agent task, routing to a single MCP tool or running the full graph."""
+        """Executes an allowlisted MCP tool (tenant enforced server-side) or the full agent graph."""
         start_time = time.perf_counter()
-        tenant_id = request.context.tenant_id if request.HasField("context") else "default"
-        trace_id = request.context.trace_id if request.HasField("context") else f"trace-{request.task_id}"
-
-        logger.info(
-            f"AgentService.ExecuteAgentSync: task_id={request.task_id}, "
-            f"tenant={tenant_id}, prompt='{request.user_prompt}', trace_id={trace_id}"
-        )
-
+        tenant_id = await _require_tenant(request, context)
+        trace_id = request.context.trace_id or f"trace-{request.task_id}"
         session_params = dict(request.session_parameters)
         tool_name = session_params.get("tool_name")
 
-        # 1. Direct tool execution routing
+        logger.info(f"AgentService.ExecuteAgentSync: task_id={request.task_id}, tenant={tenant_id}, tool={tool_name or '-'}")
+
+        # 1. Direct tool execution (allowlist + optional per-request enablement list)
         if tool_name:
+            enabled: List[str] = list(request.mcp_tools_enabled)
+            if tool_name not in ALLOWED_TENANT_TOOLS or (enabled and tool_name not in enabled):
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, f"MCP tool '{tool_name}' is not allowed")
+                raise ToolNotAllowedError(tool_name)
+
             args_raw = session_params.get("tool_args")
             if args_raw:
                 try:
                     args = json.loads(args_raw)
-                except Exception:
-                    args = {"input": args_raw}
+                    if not isinstance(args, dict):
+                        raise ValueError("tool_args must be a JSON object")
+                except Exception as exc:
+                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Invalid tool_args: {exc}")
+                    raise
             else:
-                args = {"query": request.user_prompt, "tenant_id": tenant_id}
+                args = {"query": request.user_prompt}
 
             try:
-                tool_output = await self.mcp_manager.call_tool(
-                    server_name=session_params.get("server_name"),
-                    tool_name=tool_name,
-                    arguments=args
-                )
+                tool_output = await call_tenant_scoped_tool(self.mcp_manager, tool_name, args, tenant_id)
+            except InvalidToolArgumentError as exc:
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                raise
+            except Exception as exc:
+                tool_output = None
+                tool_error = exc
+            else:
+                tool_error = None
+
+            if tool_error is None:
                 status_str = "COMPLETED"
                 response_text = f"Tool '{tool_name}' Output:\n\n{tool_output}"
-            except Exception as exc:
-                logger.error(f"Failed to execute MCP tool '{tool_name}': {exc}", exc_info=True)
+            else:
+                logger.error(f"Failed to execute MCP tool '{tool_name}': {tool_error}", exc_info=tool_error)
                 status_str = "FAILED"
-                response_text = f"Error executing MCP tool '{tool_name}': {str(exc)}"
+                response_text = f"Error executing MCP tool '{tool_name}': {type(tool_error).__name__}"
 
-            latency_ms = int((time.perf_counter() - start_time) * 1000)
             return agent_service_pb2.AgentQueryResponse(
                 task_id=request.task_id,
                 response_text=response_text,
                 execution_status=status_str,
-                total_tokens_used=120,
-                latency_ms=latency_ms
+                total_tokens_used=0,  # direct tool calls do not consume LLM tokens
+                latency_ms=int((time.perf_counter() - start_time) * 1000),
             )
 
         # 2. Full Multi-Agent Graph Execution
-        initial_state: AgentWorkflowState = {
-            "task_id": request.task_id,
-            "tenant_id": tenant_id,
-            "user_prompt": request.user_prompt,
-            "trace_id": trace_id,
-            "document_ids": [],
-            "metadata": session_params,
-            "plan": [],
-            "research_data": [],
-            "draft_report": "",
-            "critique": {},
-            "iteration_count": 0,
-            "current_node": "START",
-            "status": "PROCESSING"
-        }
-
+        initial_state = build_initial_state(
+            task_id=request.task_id,
+            tenant_id=tenant_id,
+            user_prompt=request.user_prompt,
+            trace_id=trace_id,
+            metadata=session_params,
+        )
         config = {"configurable": {"thread_id": request.task_id}}
         final_state = await self.graph.ainvoke(initial_state, config=config)
 
         response_text = final_state.get("draft_report", "")
-        status_str = "COMPLETED" if response_text else "FAILED"
-        latency_ms = int((time.perf_counter() - start_time) * 1000)
-
-        # Build citations
-        citations = []
-        for r in final_state.get("research_data", []):
-            citations.append(
-                agent_service_pb2.AgentCitation(
-                    document_id=r.get("metadata", {}).get("document_id", ""),
-                    title=r.get("citation", ""),
-                    snippet=r.get("content", "")[:200],
-                    confidence=float(r.get("rerank_score") or r.get("score") or 1.0)
-                )
+        citations = [
+            agent_service_pb2.AgentCitation(
+                document_id=str(r.get("document_id", "")),
+                title=r.get("citation", ""),
+                snippet=r.get("content", "")[:200],
+                confidence=float(r.get("rerank_score") or r.get("score") or 0.0),
             )
+            for r in final_state.get("research_data", [])
+        ]
 
         return agent_service_pb2.AgentQueryResponse(
             task_id=request.task_id,
             response_text=response_text,
             citations=citations,
-            execution_status=status_str,
-            total_tokens_used=350,
-            latency_ms=latency_ms
+            execution_status="COMPLETED" if response_text else "FAILED",
+            total_tokens_used=int(final_state.get("token_usage", 0) or 0),
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
         )
 
     async def StreamAgentWorkflow(
@@ -200,44 +196,27 @@ class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
         request: agent_service_pb2.AgentQueryRequest,
         context: grpc.aio.ServicerContext
     ) -> AsyncGenerator[agent_service_pb2.AgentWorkflowEvent, None]:
-        """
-        Server-streaming RPC: Streams live LangGraph node transitions (PLANNER, RESEARCHER,
-        SYNTHESIZER, CRITIC), MCP tool calls, and tokens.
-        """
-        tenant_id = request.context.tenant_id if request.HasField("context") else "default"
-        trace_id = request.context.trace_id if request.HasField("context") else f"trace-{request.task_id}"
+        """Server-streaming RPC emitting live LangGraph node transitions."""
+        tenant_id = await _require_tenant(request, context)
+        trace_id = request.context.trace_id or f"trace-{request.task_id}"
+        logger.info(f"AgentService.StreamAgentWorkflow started: task_id={request.task_id}, tenant={tenant_id}")
 
-        logger.info(
-            f"AgentService.StreamAgentWorkflow started: task_id={request.task_id}, "
-            f"tenant={tenant_id}, prompt='{request.user_prompt}'"
-        )
-
-        # Emit initial STARTED event
         yield agent_service_pb2.AgentWorkflowEvent(
             task_id=request.task_id,
             trace_id=trace_id,
             node_type=agent_service_pb2.NODE_TYPE_PLANNER,
             phase=agent_service_pb2.EVENT_PHASE_STARTED,
-            message="Initializing autonomous multi-agent pipeline...",
+            message="Initializing multi-agent pipeline...",
             timestamp_ms=int(time.time() * 1000)
         )
 
-        initial_state: AgentWorkflowState = {
-            "task_id": request.task_id,
-            "tenant_id": tenant_id,
-            "user_prompt": request.user_prompt,
-            "trace_id": trace_id,
-            "document_ids": [],
-            "metadata": dict(request.session_parameters),
-            "plan": [],
-            "research_data": [],
-            "draft_report": "",
-            "critique": {},
-            "iteration_count": 0,
-            "current_node": "START",
-            "status": "PROCESSING"
-        }
-
+        initial_state = build_initial_state(
+            task_id=request.task_id,
+            tenant_id=tenant_id,
+            user_prompt=request.user_prompt,
+            trace_id=trace_id,
+            metadata=dict(request.session_parameters),
+        )
         config = {"configurable": {"thread_id": request.task_id}}
 
         try:
@@ -249,14 +228,12 @@ class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
                     msg_text = f"Node '{node_name}' finished: status={node_status}"
 
                     if node_name == "planner":
-                        plan_steps = node_output.get("plan", [])
-                        msg_text = f"Planner decomposed prompt into {len(plan_steps)} sub-tasks."
+                        msg_text = f"Planner produced {len(node_output.get('plan', []))} search queries."
                     elif node_name == "researcher":
-                        r_data = node_output.get("research_data", [])
-                        msg_text = f"Researcher retrieved {len(r_data)} factual context citations."
+                        msg_text = f"Researcher holds {len(node_output.get('research_data', []))} evidence items."
                     elif node_name == "synthesizer":
                         token_chunk = node_output.get("draft_report", "")
-                        msg_text = f"Synthesized executive report ({len(token_chunk)} characters)."
+                        msg_text = f"Synthesized report ({len(token_chunk)} characters)."
                     elif node_name == "critic":
                         crit = node_output.get("critique", {})
                         msg_text = f"Critic evaluation: valid={crit.get('is_valid')}, score={crit.get('hallucination_score')}"
@@ -271,13 +248,12 @@ class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
                         timestamp_ms=int(time.time() * 1000)
                     )
 
-            # Emit final workflow completion event
             yield agent_service_pb2.AgentWorkflowEvent(
                 task_id=request.task_id,
                 trace_id=trace_id,
                 node_type=agent_service_pb2.NODE_TYPE_SYNTHESIZER,
                 phase=agent_service_pb2.EVENT_PHASE_COMPLETED,
-                message="Multi-agent workflow successfully completed.",
+                message="Multi-agent workflow completed.",
                 timestamp_ms=int(time.time() * 1000)
             )
         except Exception as exc:
@@ -287,6 +263,6 @@ class AgentServiceServicer(agent_service_pb2_grpc.AgentServiceServicer):
                 trace_id=trace_id,
                 node_type=agent_service_pb2.NODE_TYPE_UNSPECIFIED,
                 phase=agent_service_pb2.EVENT_PHASE_FAILED,
-                message=f"Agent workflow error: {str(exc)}",
+                message=f"Agent workflow error: {type(exc).__name__}",
                 timestamp_ms=int(time.time() * 1000)
             )

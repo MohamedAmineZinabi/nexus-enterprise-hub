@@ -1,6 +1,6 @@
 import { Injectable, NgZone, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, tap, catchError, map, of, finalize } from 'rxjs';
+import { Observable, tap, catchError, map, of } from 'rxjs';
 import { AuthService } from './auth.service';
 import { ApiResponse } from '../models/auth.models';
 import {
@@ -11,7 +11,6 @@ import {
   McpToolsResponse,
   NodeExecutionState,
   StreamStatus,
-  TaskCompletedEvent,
   TaskPageResponse,
   TaskProgressEvent,
   TaskResponse,
@@ -48,6 +47,7 @@ export class AgentStudioService {
 
   // Task History and MCP Tools State
   readonly recentTasks = signal<TaskSummary[]>([]);
+  readonly totalTasks = signal<number>(0);
   readonly isLoadingRecent = signal<boolean>(false);
   readonly mcpTools = signal<McpToolInfo[]>([]);
   readonly isLoadingTools = signal<boolean>(false);
@@ -120,7 +120,7 @@ export class AgentStudioService {
           const progress: TaskProgressEvent = {
             taskId: raw.taskId || taskId,
             nodeName: (raw.nodeName || raw.nodeType || 'PLANNER').toUpperCase(),
-            status: raw.status || 'IN_PROGRESS',
+            status: raw.status || 'PROCESSING',
             durationMs: Number(raw.durationMs || 0),
             message: raw.message || `Processing node ${raw.nodeName}...`,
             payload: raw.payload,
@@ -193,8 +193,13 @@ export class AgentStudioService {
     };
 
     // Error handling on EventSource
-    this.eventSource.onerror = (err) => {
+    const source = this.eventSource;
+    this.eventSource.onerror = () => {
       this.ngZone.run(() => {
+        // Ignore late errors from a stream we've already replaced or closed
+        if (this.eventSource !== source) {
+          return;
+        }
         // If we already finished and received the final report, standard SSE close triggers error
         if (this.streamStatus() === 'COMPLETED' || this.finalReport()) {
           this.closeStream();
@@ -216,10 +221,20 @@ export class AgentStudioService {
         const task = res.data;
         if (task && (task.status === 'COMPLETED' || task.status === 'FAILED')) {
           this.applyCompletedTask(task);
-        } else {
-          this.streamStatus.set('ERROR');
-          this.error.set('SSE telemetry connection interrupted. Verify network connectivity.');
+          this.closeStream();
+          return;
         }
+
+        // Task still PENDING/PROCESSING: if the browser is auto-reconnecting the
+        // EventSource (transient drop), keep it alive instead of tearing it down.
+        const source = this.eventSource;
+        if (source && source.readyState === EventSource.CONNECTING) {
+          this.streamStatus.set('CONNECTING');
+          return;
+        }
+
+        this.streamStatus.set('ERROR');
+        this.error.set('SSE telemetry connection interrupted. Verify network connectivity.');
         this.closeStream();
       },
       error: () => {
@@ -296,6 +311,11 @@ export class AgentStudioService {
   loadRecentTasks(page: number = 0, size: number = 10): Observable<TaskSummary[]> {
     this.isLoadingRecent.set(true);
     return this.http.get<ApiResponse<TaskPageResponse>>(`/api/v1/tasks?page=${page}&size=${size}&sortBy=createdAt&direction=desc`).pipe(
+      tap(res => {
+        const items = res.data?.items || [];
+        // totalItems is the tenant-wide total across all pages (not the page length)
+        this.totalTasks.set(res.data?.totalItems ?? items.length);
+      }),
       map(res => res.data?.items || []),
       tap(items => {
         this.recentTasks.set(items);
@@ -319,7 +339,7 @@ export class AgentStudioService {
         this.mcpTools.set(tools);
         this.isLoadingTools.set(false);
       }),
-      catchError(err => {
+      catchError(() => {
         this.isLoadingTools.set(false);
         // Fallback default enterprise tools if endpoint is starting up
         return of([]);

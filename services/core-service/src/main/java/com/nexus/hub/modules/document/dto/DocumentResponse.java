@@ -20,8 +20,11 @@ public class DocumentResponse {
     private Long fileSize;
     private String mimeType;
     private String vectorCollection;
+    /** INDEXING while ai-service is processing; INDEXED or FAILED once document.ingest.completed arrives. */
     private DocumentStatus status;
     private Integer chunksCount;
+    /** Failure reason when status is FAILED, otherwise null. */
+    private String errorDetails;
     private Instant createdAt;
     private Instant updatedAt;
 
@@ -34,6 +37,7 @@ public class DocumentResponse {
                 .vectorCollection(doc.getVectorCollection())
                 .status(doc.getStatus())
                 .chunksCount(doc.getChunksCount())
+                .errorDetails(doc.getErrorDetails())
                 .createdAt(doc.getCreatedAt())
                 .updatedAt(doc.getUpdatedAt())
                 .build();

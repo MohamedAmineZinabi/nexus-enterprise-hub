@@ -2,7 +2,8 @@ export type TaskType = 'DEEP_RESEARCH' | 'DOCUMENT_ANALYSIS';
 
 export type AgentNodeName = 'PLANNER' | 'RESEARCHER' | 'SYNTHESIZER' | 'CRITIC';
 
-export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+/** Mirrors core-service `TaskStatus` enum. */
+export type TaskStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
 export type StreamStatus = 'IDLE' | 'CONNECTING' | 'STREAMING' | 'COMPLETED' | 'FAILED' | 'ERROR';
 

@@ -1,6 +1,7 @@
 package com.nexus.hub.modules.task.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -16,6 +17,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Service
 public class TaskStreamHub {
 
+    static final long HEARTBEAT_INTERVAL_MS = 15000;
+
     private final ConcurrentHashMap<UUID, CopyOnWriteArrayList<SseEmitter>> taskEmitters = new ConcurrentHashMap<>();
 
     /**
@@ -26,7 +29,7 @@ public class TaskStreamHub {
      * @return configured SseEmitter instance with callbacks and handshake sent
      */
     public SseEmitter registerClient(UUID taskId, long timeoutMillis) {
-        SseEmitter emitter = new SseEmitter(timeoutMillis);
+        SseEmitter emitter = createEmitter(timeoutMillis);
 
         CopyOnWriteArrayList<SseEmitter> emitters =
                 taskEmitters.computeIfAbsent(taskId, k -> new CopyOnWriteArrayList<>());
@@ -60,10 +63,16 @@ public class TaskStreamHub {
                             "timestamp", Instant.now().toString()
                     )));
             log.info("Registered SSE subscriber for taskId={}. Total active: {}", taskId, emitters.size());
-        } catch (IOException e) {
-            log.error("Failed to send initial SSE handshake for taskId={}: {}", taskId, e.getMessage());
+        } catch (IOException | IllegalStateException e) {
+            // IllegalStateException: the stream was completed concurrently (e.g. the task finished
+            // between registration and handshake) - release it quietly instead of failing the request.
+            log.warn("Could not send initial SSE handshake for taskId={}: {}", taskId, e.getMessage());
             cleanup.run();
-            emitter.completeWithError(e);
+            try {
+                emitter.completeWithError(e);
+            } catch (Exception ignored) {
+                // already completed
+            }
         }
 
         return emitter;
@@ -122,6 +131,61 @@ public class TaskStreamHub {
                 }
             }
         }
+    }
+
+    /**
+     * Sends an SSE comment ({@code : keep-alive}) to every active emitter every 15s so idle streams are
+     * not cut by proxies (NGINX proxy_read_timeout) or load balancers. Emitters whose client has gone
+     * away (IOException / IllegalStateException on send) are removed and closed. Runs on the scheduler
+     * thread concurrently with Kafka-driven broadcasts: the map/list are concurrent collections
+     * (iteration is over a snapshot) and SseEmitter serializes concurrent sends internally.
+     */
+    @Scheduled(fixedRate = HEARTBEAT_INTERVAL_MS)
+    public void sendHeartbeats() {
+        for (Map.Entry<UUID, CopyOnWriteArrayList<SseEmitter>> entry : taskEmitters.entrySet()) {
+            UUID taskId = entry.getKey();
+            CopyOnWriteArrayList<SseEmitter> emitters = entry.getValue();
+            for (SseEmitter emitter : emitters) {
+                try {
+                    emitter.send(SseEmitter.event().comment("keep-alive"));
+                } catch (IOException | IllegalStateException e) {
+                    log.debug("SSE heartbeat failed for taskId={}; removing emitter: {}", taskId, e.getMessage());
+                    emitters.remove(emitter);
+                    closeQuietly(emitter, e);
+                } catch (RuntimeException e) {
+                    log.warn("Unexpected SSE heartbeat error for taskId={}; removing emitter: {}", taskId, e.getMessage());
+                    emitters.remove(emitter);
+                    closeQuietly(emitter, e);
+                }
+            }
+            if (emitters.isEmpty()) {
+                taskEmitters.remove(taskId, emitters);
+            }
+        }
+    }
+
+    private static void closeQuietly(SseEmitter emitter, Throwable cause) {
+        try {
+            if (cause instanceof IOException) {
+                emitter.completeWithError(cause);
+            } else {
+                emitter.complete();
+            }
+        } catch (Exception ignored) {
+            // Already completed / response already closed: nothing left to release
+        }
+    }
+
+    /** Factory for emitters; overridable in tests. */
+    protected SseEmitter createEmitter(long timeoutMillis) {
+        return new SseEmitter(timeoutMillis);
+    }
+
+    /**
+     * Total number of active SSE subscribers across all tasks.
+     */
+    public int getTotalActiveSubscriberCount() {
+        return taskEmitters.values().stream().mapToInt(List::size).sum();
     }
 
     /**

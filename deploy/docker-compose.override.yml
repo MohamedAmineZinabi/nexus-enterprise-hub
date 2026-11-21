@@ -1,0 +1,35 @@
+# ==============================================================================
+# NexusEnterprise Hub - LOCAL DEVELOPMENT overrides
+#
+# Publishes infrastructure and backend ports for local tooling, bound to 127.0.0.1 only
+# (never 0.0.0.0). Do not use this file in shared or production environments.
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.override.yml up -d
+#   (the Makefile does this for you)
+# ==============================================================================
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+
+  qdrant:
+    ports:
+      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
+
+  kafka:
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-9092}:9092"
+
+  ai-service:
+    ports:
+      - "127.0.0.1:${AI_SERVICE_HTTP_PORT:-8000}:8000"
+      - "127.0.0.1:${AI_SERVICE_GRPC_PORT:-50051}:50051"
+
+  core-service:
+    ports:
+      - "127.0.0.1:${CORE_SERVICE_PORT:-8080}:8080"

@@ -248,13 +248,9 @@ def test_giskard_multi_tenant_data_leakage_isolation(
                     "layer": "hybrid_retriever",
                     "leaked_token": forbidden,
                 })
-            # Check findings/observations & citations sections (excluding echoed prompt header)
-            if "## 2. Key Findings" in output_str:
-                body_section = output_str.split("## 2. Key Findings", 1)[-1]
-            elif "## Analysis & Observations" in output_str:
-                body_section = output_str.split("## Analysis & Observations", 1)[-1]
-            else:
-                body_section = output_str
+            # Check everything after the title line (the "# Research Report: <prompt>" header echoes
+            # the adversarial prompt itself, which is not a leak of Tenant B data)
+            body_section = output_str.split("\n", 1)[-1] if output_str.startswith("# ") else output_str
             if forbidden in body_section:
                 violations.append({
                     "probe_id": probe["id"],

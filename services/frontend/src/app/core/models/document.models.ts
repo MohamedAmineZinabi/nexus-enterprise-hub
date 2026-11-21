@@ -1,4 +1,22 @@
-export type DocumentStatus = 'UPLOADED' | 'UPLOADED_PENDING_INDEX' | 'INDEXED' | 'FAILED';
+/** Mirrors core-service `DocumentStatus` enum. */
+export type DocumentStatus =
+  | 'UPLOADED'
+  | 'UPLOADED_PENDING_INDEX'
+  | 'PROCESSING'
+  | 'INDEXING'
+  | 'INDEXED'
+  | 'FAILED';
+
+/** Statuses for which asynchronous indexing is still in flight. */
+export const IN_FLIGHT_DOCUMENT_STATUSES: ReadonlyArray<DocumentStatus> = [
+  'UPLOADED_PENDING_INDEX',
+  'PROCESSING',
+  'INDEXING'
+];
+
+export function isDocumentIndexing(status: DocumentStatus | string | null | undefined): boolean {
+  return !!status && (IN_FLIGHT_DOCUMENT_STATUSES as ReadonlyArray<string>).includes(status);
+}
 
 export interface DocumentItem {
   id: string;

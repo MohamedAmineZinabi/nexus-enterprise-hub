@@ -1,9 +1,15 @@
 import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule, ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
+import { FormsModule } from '@angular/forms';
+import { takeUntilDestroyed, toObservable } from '@angular/core/rxjs-interop';
+import { EMPTY, catchError, distinctUntilChanged, exhaustMap, switchMap, timer } from 'rxjs';
 import { DocumentService } from '../../core/services/document.service';
 import { AuthService } from '../../core/services/auth.service';
-import { DocumentItem, HybridSearchRequest } from '../../core/models/document.models';
+import { isGloballyHandledHttpError } from '../../core/interceptors/error.interceptor';
+import { DocumentItem, HybridSearchRequest, isDocumentIndexing } from '../../core/models/document.models';
+
+/** Interval between document status refreshes while any document is still indexing. */
+const INDEXING_POLL_INTERVAL_MS = 3000;
 
 interface ToastNotification {
   id: string;
@@ -15,7 +21,7 @@ interface ToastNotification {
 @Component({
   selector: 'app-knowledge-base',
   standalone: true,
-  imports: [CommonModule, FormsModule, ReactiveFormsModule],
+  imports: [CommonModule, FormsModule],
   template: `
     <div class="space-y-6">
       <!-- Toast Notifications Container -->
@@ -322,7 +328,7 @@ interface ToastNotification {
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
-                      Ingesting & Embedding...
+                      Uploading...
                     </span>
                     <span class="font-mono text-brand-400 font-semibold">{{ documentService.uploadProgress() }}%</span>
                   </div>
@@ -362,9 +368,17 @@ interface ToastNotification {
                   </h3>
                   <p class="text-xs text-slate-400 mt-0.5">Vector embeddings partitioned by tenant context</p>
                 </div>
-                <span class="text-xs font-mono text-slate-400">
-                  {{ documentService.documents().length }} files
-                </span>
+                <div class="flex items-center gap-3">
+                  @if (indexingCount() > 0) {
+                    <span class="inline-flex items-center gap-1.5 text-[11px] font-mono text-brand-300" aria-live="polite">
+                      <span class="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse"></span>
+                      {{ indexingCount() }} indexing &middot; auto-refreshing
+                    </span>
+                  }
+                  <span class="text-xs font-mono text-slate-400">
+                    {{ documentService.documents().length }} files
+                  </span>
+                </div>
               </div>
 
               <!-- Table or Empty State -->
@@ -431,11 +445,29 @@ interface ToastNotification {
                                   PENDING
                                 </span>
                               }
+                              @case ('PROCESSING') {
+                                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                                  PROCESSING
+                                </span>
+                              }
+                              @case ('INDEXING') {
+                                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-brand-950/80 text-brand-300 border border-brand-800/60" title="Embedding and indexing in progress">
+                                  <svg class="w-3 h-3 animate-spin text-brand-400" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                  </svg>
+                                  INDEXING
+                                </span>
+                              }
                               @case ('FAILED') {
-                                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-950/80 text-red-300 border border-red-800/60">
-                                  <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span>
+                                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-950/80 text-red-300 border border-red-800/60" title="Indexing failed. Delete and re-upload the document to retry.">
+                                  <svg class="w-3 h-3 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
                                   FAILED
                                 </span>
+                                <div class="text-[10px] text-red-400/90 mt-1">Indexing failed &mdash; re-upload to retry</div>
                               }
                               @default {
                                 <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-950/80 text-blue-300 border border-blue-800/60">
@@ -447,9 +479,13 @@ interface ToastNotification {
 
                           <!-- Chunks -->
                           <td class="px-4 py-3.5 font-mono text-slate-300">
-                            <span class="px-2 py-0.5 rounded bg-slate-950/60 border border-slate-800">
-                              {{ doc.chunksCount }} chunks
-                            </span>
+                            @if (isIndexing(doc)) {
+                              <span class="text-slate-500">&mdash;</span>
+                            } @else {
+                              <span class="px-2 py-0.5 rounded bg-slate-950/60 border border-slate-800">
+                                {{ doc.chunksCount || 0 }} chunks
+                              </span>
+                            }
                           </td>
 
                           <!-- Created At -->
@@ -730,6 +766,31 @@ export class KnowledgeBaseComponent implements OnInit {
   readonly totalChunks = computed(() =>
     this.documentService.documents().reduce((sum, d) => sum + (d.chunksCount || 0), 0)
   );
+  readonly indexingCount = computed(() =>
+    this.documentService.documents().filter(d => isDocumentIndexing(d.status)).length
+  );
+  private readonly hasIndexingDocuments = computed(() => this.indexingCount() > 0);
+
+  /** Last known status per document id, used to announce INDEXED / FAILED transitions. */
+  private readonly knownStatuses = new Map<string, string>();
+
+  constructor() {
+    // Single status poller: switchMap guarantees at most one active timer; it starts
+    // when any listed document is in flight and stops as soon as none are.
+    // exhaustMap drops ticks while a refresh request is still pending.
+    toObservable(this.hasIndexingDocuments).pipe(
+      distinctUntilChanged(),
+      switchMap(active => active
+        ? timer(INDEXING_POLL_INTERVAL_MS, INDEXING_POLL_INTERVAL_MS).pipe(
+            exhaustMap(() => this.documentService.loadDocuments(true).pipe(
+              catchError(() => EMPTY)
+            ))
+          )
+        : EMPTY
+      ),
+      takeUntilDestroyed()
+    ).subscribe(docs => this.announceStatusTransitions(docs));
+  }
 
   ngOnInit(): void {
     this.loadInitialDocuments();
@@ -737,21 +798,49 @@ export class KnowledgeBaseComponent implements OnInit {
 
   loadInitialDocuments(): void {
     this.documentService.loadDocuments().subscribe({
+      next: docs => this.rememberStatuses(docs),
       error: (err) => {
-        this.addToast('error', 'Failed to load documents', err.message || 'Server error');
+        if (!isGloballyHandledHttpError(err)) {
+          this.addToast('error', 'Failed to load documents', err.message || 'Server error');
+        }
       }
     });
   }
 
   refreshDocuments(): void {
     this.documentService.loadDocuments().subscribe({
-      next: () => {
+      next: (docs) => {
+        this.announceStatusTransitions(docs);
         this.addToast('info', 'Refreshed', 'Tenant document list updated');
       },
       error: (err) => {
-        this.addToast('error', 'Refresh Failed', err.message || 'Could not fetch documents');
+        if (!isGloballyHandledHttpError(err)) {
+          this.addToast('error', 'Refresh Failed', err.message || 'Could not fetch documents');
+        }
       }
     });
+  }
+
+  isIndexing(doc: DocumentItem): boolean {
+    return isDocumentIndexing(doc.status);
+  }
+
+  private rememberStatuses(docs: DocumentItem[]): void {
+    docs.forEach(d => this.knownStatuses.set(d.id, d.status));
+  }
+
+  private announceStatusTransitions(docs: DocumentItem[]): void {
+    for (const doc of docs) {
+      const previous = this.knownStatuses.get(doc.id);
+      if (previous && isDocumentIndexing(previous) && previous !== doc.status) {
+        if (doc.status === 'INDEXED') {
+          this.addToast('success', 'Indexing Complete', `'${doc.filename}' is searchable (${doc.chunksCount || 0} chunks).`);
+        } else if (doc.status === 'FAILED') {
+          this.addToast('error', 'Indexing Failed', `'${doc.filename}' could not be indexed. Delete and re-upload to retry.`);
+        }
+      }
+    }
+    this.rememberStatuses(docs);
   }
 
   toggleAdvancedSettings(): void {
@@ -824,15 +913,18 @@ export class KnowledgeBaseComponent implements OnInit {
     ).subscribe({
       next: (res) => {
         this.selectedFile.set(null);
+        this.knownStatuses.set(res.documentId, res.status || 'INDEXING');
         this.addToast(
-          'success',
-          'Document Ingested Successfully',
-          `Created ${res.chunksCreated} chunks in vector collection '${res.vectorCollection}'.`
+          'info',
+          'Upload Accepted',
+          `'${res.fileName}' is being indexed into '${res.vectorCollection}'. Status will update automatically.`
         );
       },
       error: (err) => {
-        const msg = err.error?.message || err.message || 'Upload failed';
-        this.addToast('error', 'Ingestion Failed', msg);
+        if (!isGloballyHandledHttpError(err)) {
+          const msg = err.error?.message || err.message || 'Upload failed';
+          this.addToast('error', 'Upload Failed', msg);
+        }
       }
     });
   }
@@ -857,7 +949,9 @@ export class KnowledgeBaseComponent implements OnInit {
       },
       error: (err) => {
         this.documentToDelete.set(null);
-        this.addToast('error', 'Delete Failed', err.message || 'Failed to purge document');
+        if (!isGloballyHandledHttpError(err)) {
+          this.addToast('error', 'Delete Failed', err.error?.message || err.message || 'Failed to purge document');
+        }
       }
     });
   }
@@ -882,8 +976,10 @@ export class KnowledgeBaseComponent implements OnInit {
         }
       },
       error: (err) => {
-        const msg = err.error?.message || err.message || 'Search execution failed';
-        this.addToast('error', 'Search Error', msg);
+        if (!isGloballyHandledHttpError(err)) {
+          const msg = err.error?.message || err.message || 'Search execution failed';
+          this.addToast('error', 'Search Error', msg);
+        }
       }
     });
   }

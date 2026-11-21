@@ -4,6 +4,7 @@ import { RouterLink } from '@angular/router';
 import { AuthService } from '../../core/services/auth.service';
 import { DocumentService } from '../../core/services/document.service';
 import { AgentStudioService } from '../../core/services/agent-studio.service';
+import { isDocumentIndexing } from '../../core/models/document.models';
 
 @Component({
   selector: 'app-dashboard',
@@ -181,7 +182,7 @@ import { AgentStudioService } from '../../core/services/agent-studio.service';
                       {{ doc.chunksCreated || doc.chunksCount || 0 }} chunks • {{ doc.vectorCollection }}
                     </p>
                   </div>
-                  <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-400 ring-1 ring-inset ring-emerald-800/40 shrink-0">
+                  <span [class]="getDocBadgeClass(doc.status)">
                     {{ doc.status }}
                   </span>
                 </div>
@@ -238,7 +239,8 @@ export class DashboardComponent implements OnInit {
   readonly totalChunks = computed(() =>
     this.documents().reduce((acc, d) => acc + (d.chunksCreated || d.chunksCount || 0), 0)
   );
-  readonly totalTasks = computed(() => this.recentTasks().length);
+  // Tenant-wide total from the paginated response (`totalItems`), not the current page size
+  readonly totalTasks = this.agentStudioService.totalTasks;
   readonly totalMcpTools = computed(() => this.agentStudioService.mcpTools().length);
 
   ngOnInit(): void {
@@ -252,7 +254,8 @@ export class DashboardComponent implements OnInit {
     switch (status) {
       case 'COMPLETED':
         return base + 'bg-emerald-950 text-emerald-400 ring-emerald-800';
-      case 'IN_PROGRESS':
+      case 'PROCESSING':
+        return base + 'bg-brand-950 text-brand-300 ring-brand-800';
       case 'PENDING':
         return base + 'bg-yellow-950 text-yellow-400 ring-yellow-800';
       case 'FAILED':
@@ -260,5 +263,19 @@ export class DashboardComponent implements OnInit {
       default:
         return base + 'bg-slate-800 text-slate-400 ring-slate-700';
     }
+  }
+
+  getDocBadgeClass(status: string): string {
+    const base = 'inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono ring-1 ring-inset shrink-0 ';
+    if (status === 'INDEXED') {
+      return base + 'bg-emerald-950 text-emerald-400 ring-emerald-800/40';
+    }
+    if (status === 'FAILED') {
+      return base + 'bg-red-950 text-red-400 ring-red-800/40';
+    }
+    if (isDocumentIndexing(status)) {
+      return base + 'bg-amber-950 text-amber-300 ring-amber-800/40';
+    }
+    return base + 'bg-slate-800 text-slate-400 ring-slate-700';
   }
 }

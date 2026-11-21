@@ -1,5 +1,6 @@
 package com.nexus.hub.security;
 
+import com.nexus.hub.modules.user.entity.Role;
 import com.nexus.hub.modules.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -46,9 +47,16 @@ public class SecurityConfig {
                         .requestMatchers(
                                 "/api/v1/auth/register",
                                 "/api/v1/auth/login",
-                                "/actuator/**",
+                                "/actuator/health",
+                                "/actuator/health/**",
                                 "/error"
                         ).permitAll()
+                        // Authorities are "ROLE_" + Role.name() (see UserPrincipal.create).
+                        // Actuator runs on management.server.port (8081); Spring Boot applies this same
+                        // springSecurityFilterChain to the management child context, so these rules hold
+                        // there. On server.port 8080 actuator endpoints are not mapped at all.
+                        // PLATFORM_OPERATOR is never assigned by registration or any API (tenant ADMIN is not enough).
+                        .requestMatchers("/actuator/**").hasRole(Role.PLATFORM_OPERATOR.name())
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(ex -> ex.authenticationEntryPoint((request, response, authException) -> {
@@ -57,15 +65,29 @@ public class SecurityConfig {
                     response.getWriter().write("{\"success\":false,\"message\":\"Full authentication is required to access this resource\"}");
                 }))
                 .authenticationProvider(authenticationProvider())
+                // JWT filter first (authenticates, fail-closed 503 on revocation-store outage), then the
+                // rate limiter, which handles both tenant quotas (needs the principal) and the per-IP
+                // throttle for unauthenticated /auth/login and /auth/register (needs no principal).
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(tenantRateLimitFilter, JwtAuthenticationFilter.class);
 
         return http.build();
     }
 
+    /**
+     * Both filters are @Components; disable Boot's automatic servlet-container registration so they
+     * only run once, inside the Spring Security chain.
+     */
     @Bean
     public FilterRegistrationBean<TenantRateLimitFilter> tenantRateLimitFilterRegistration(TenantRateLimitFilter filter) {
         FilterRegistrationBean<TenantRateLimitFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public FilterRegistrationBean<JwtAuthenticationFilter> jwtAuthenticationFilterRegistration(JwtAuthenticationFilter filter) {
+        FilterRegistrationBean<JwtAuthenticationFilter> registration = new FilterRegistrationBean<>(filter);
         registration.setEnabled(false);
         return registration;
     }

@@ -1,6 +1,4 @@
-import asyncio
 import logging
-from concurrent import futures
 from typing import Optional
 import grpc
 
@@ -8,6 +6,7 @@ from app.core.config import settings
 from app.grpc.generated.ai.v1 import rag_service_pb2_grpc, agent_service_pb2_grpc
 from app.grpc.servicers.rag_servicer import RagServiceServicer
 from app.grpc.servicers.agent_servicer import AgentServiceServicer
+from app.security.auth import InternalApiKeyServerInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +29,10 @@ async def start_grpc_server() -> grpc.aio.Server:
         ("grpc.keepalive_permit_without_calls", 1),
     ]
 
+    # Every RPC must carry the x-internal-api-key metadata (see app.security.auth)
     _grpc_server = grpc.aio.server(
-        options=server_options
+        options=server_options,
+        interceptors=[InternalApiKeyServerInterceptor()],
     )
 
     rag_service_pb2_grpc.add_RagServiceServicer_to_server(RagServiceServicer(), _grpc_server)

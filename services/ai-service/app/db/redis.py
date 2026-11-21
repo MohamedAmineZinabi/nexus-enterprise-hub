@@ -93,13 +93,15 @@ class DistributedTaskLock:
     Includes auto-renewal heartbeat and atomic release via Lua script.
     """
 
-    def __init__(self, client: aioredis.Redis, task_id: str, timeout_seconds: int = 120):
+    def __init__(self, client: aioredis.Redis, task_id: str, timeout_seconds: int = 120, lock_key: Optional[str] = None):
         self.client = client
         self.task_id = task_id
-        self.lock_key = f"lock:task:{task_id}"
+        self.lock_key = lock_key or f"lock:task:{task_id}"
         self.token = f"worker-{uuid.uuid4().hex}"
         self.timeout_seconds = timeout_seconds
         self.acquired = False
+        # True when the lock store itself failed (as opposed to the lock being held by another worker)
+        self.error: Optional[Exception] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def acquire(self) -> bool:
@@ -121,6 +123,7 @@ class DistributedTaskLock:
         except Exception as e:
             logger.error(f"[DistributedLock] Error acquiring lock for task '{self.task_id}': {e}")
             self.acquired = False
+            self.error = e
             return False
 
     async def release(self) -> bool:
@@ -186,6 +189,25 @@ async def distributed_task_lock(task_id: str, timeout_seconds: int = 120):
     client = await get_redis_client()
     lock = DistributedTaskLock(client, task_id, timeout_seconds=timeout_seconds)
     await lock.acquire()
+    try:
+        yield lock
+    finally:
+        if lock.acquired:
+            await lock.release()
+
+
+@asynccontextmanager
+async def distributed_lock(lock_key: str, timeout_seconds: int = 120):
+    """
+    Generic Redlock-style context manager for an arbitrary key (e.g. ``lock:doc:{documentId}``).
+    Raises RuntimeError when the lock store is unreachable so callers never mistake an outage
+    for lock contention.
+    """
+    client = await get_redis_client()
+    lock = DistributedTaskLock(client, lock_key, timeout_seconds=timeout_seconds, lock_key=lock_key)
+    await lock.acquire()
+    if lock.error is not None:
+        raise RuntimeError(f"Distributed lock store unavailable: {lock.error}")
     try:
         yield lock
     finally:

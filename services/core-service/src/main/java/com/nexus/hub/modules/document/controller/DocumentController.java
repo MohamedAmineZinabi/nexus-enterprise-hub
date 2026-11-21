@@ -6,7 +6,6 @@ import com.nexus.hub.modules.document.dto.DocumentUploadResponse;
 import com.nexus.hub.modules.document.dto.HybridSearchRequestDto;
 import com.nexus.hub.modules.document.dto.HybridSearchResponseDto;
 import com.nexus.hub.modules.document.service.DocumentService;
-import com.nexus.hub.modules.task.entity.DocumentStatus;
 import com.nexus.hub.security.UserPrincipal;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -43,12 +42,8 @@ public class DocumentController {
         DocumentUploadResponse response = documentService.uploadAndIngest(
                 principal, file, chunkSize, chunkOverlap, vectorCollection);
 
-        if (response.getStatus() == DocumentStatus.UPLOADED_PENDING_INDEX) {
-            return ResponseEntity.status(HttpStatus.ACCEPTED)
-                    .body(ApiResponse.success(response, response.getMessage()));
-        }
-
-        return ResponseEntity.status(HttpStatus.CREATED)
+        // Ingestion is asynchronous (status INDEXING); clients poll GET /api/v1/documents for the outcome.
+        return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(ApiResponse.success(response, response.getMessage()));
     }
 

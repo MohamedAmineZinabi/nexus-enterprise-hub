@@ -26,7 +26,7 @@ mkdir -p "${PYTHON_OUT_DIR}/ai/v1"
 # Compile via containerized protoc runner (guarantees identical compiler version)
 echo "Compiling .proto definitions using python:3.11-slim + grpcio-tools..."
 docker run --rm -v "${PROJECT_ROOT}:/workspace" -w /workspace python:3.11-slim sh -c \
-  "pip install --quiet grpcio-tools && python -m grpc_tools.protoc -I proto --python_out=services/ai-service/app/grpc/generated --grpc_python_out=services/ai-service/app/grpc/generated --pyi_out=services/ai-service/app/grpc/generated proto/ai/common.proto proto/ai/v1/rag_service.proto proto/ai/v1/agent_service.proto"
+  "pip install --quiet grpcio-tools==1.84.0 && python -m grpc_tools.protoc -I proto --python_out=services/ai-service/app/grpc/generated --grpc_python_out=services/ai-service/app/grpc/generated --pyi_out=services/ai-service/app/grpc/generated proto/ai/common.proto proto/ai/v1/rag_service.proto proto/ai/v1/agent_service.proto"
 
 # ------------------------------------------------------------------------------
 # Create package __init__.py files

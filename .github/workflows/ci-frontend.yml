@@ -12,10 +12,22 @@ on:
       - 'services/frontend/**'
       - '.github/workflows/ci-frontend.yml'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Install Dependencies & Build Production Bundle
+    name: Unit Tests & Production Bundle
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: services/frontend
 
     steps:
       - name: Checkout repository
@@ -29,9 +41,26 @@ jobs:
           cache-dependency-path: services/frontend/package-lock.json
 
       - name: Install npm dependencies
-        working-directory: services/frontend
         run: npm ci
 
+      - name: Run unit tests (Karma + Jasmine, ChromeHeadless)
+        run: npm run test:ci
+
       - name: Build production Angular bundle
-        working-directory: services/frontend
         run: npm run build
+
+  docker:
+    name: Docker Image & NGINX Config Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build frontend image
+        run: docker build -t nexus-frontend:ci services/frontend
+
+      - name: Validate NGINX configuration (nginx -t)
+        run: docker run --rm --add-host core-service:127.0.0.1 nexus-frontend:ci nginx -t
